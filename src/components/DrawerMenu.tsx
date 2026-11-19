@@ -5,7 +5,6 @@ import {
   Smartphone,
   Cpu,
   Globe,
-  BookOpen,
   Info,
   ChevronRight,
   ZoomIn,
@@ -21,8 +20,7 @@ import {
   UserCheck,
   Trash2,
   Plus,
-  Play,
-  FileCode2,
+  Download,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import { EngineType } from '../types';
@@ -37,17 +35,15 @@ import {
   isMobileOrApk,
   SavedServerEntry,
 } from '../utils/apiConfig';
+import { downloadProjectUpdateZip } from '../utils/updateBundle';
 
 interface DrawerMenuProps {
   isOpen: boolean;
   onClose: () => void;
   engine: EngineType;
   onChangeEngine: (engine: EngineType) => void;
-  onOpenEditor?: () => void;
-  onRunCode?: () => void;
   onOpenPip: () => void;
   onOpenApk: () => void;
-  onOpenSamples: () => void;
   onOpenSyntaxColor: () => void;
   onOpenApiKeySettings?: () => void;
   onOpenGoogleWorkspace?: () => void;
@@ -64,11 +60,8 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onClose,
   engine,
   onChangeEngine,
-  onOpenEditor,
-  onRunCode,
   onOpenPip,
   onOpenApk,
-  onOpenSamples,
   onOpenSyntaxColor,
   onOpenApiKeySettings,
   onOpenGoogleWorkspace,
@@ -90,6 +83,8 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   const [serverInputUrl, setServerInputUrl] = useState<string>(() => getCustomServerUrl());
   const [serverInputLabel, setServerInputLabel] = useState<string>('');
   const [serverHistory, setServerHistory] = useState<SavedServerEntry[]>(() => getSavedServerHistory());
+  const [downloadingUpdate, setDownloadingUpdate] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -189,6 +184,19 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
     onServerUrlChanged?.();
   };
 
+  const handleDownloadUpdateFiles = async () => {
+    setDownloadingUpdate(true);
+    setUpdateNotice(null);
+    try {
+      const res = await downloadProjectUpdateZip((msg) => {
+        setUpdateNotice({ ok: true, text: msg });
+      });
+      setUpdateNotice({ ok: res.ok, text: res.message });
+    } finally {
+      setDownloadingUpdate(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const isGoogleConnected = !!(googleUser && hasGoogleToken);
@@ -241,256 +249,74 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
             </button>
           </div>
 
-          {/* Drawer Body */}
-          <div className="p-3 space-y-3.5 flex-1">
-            {/* Primary Quick Cards (Matching Reference UI) */}
-            <div className="space-y-2">
-              {onOpenEditor && (
-                <button
-                  onClick={() => {
-                    onOpenEditor();
-                    onClose();
-                  }}
-                  className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#0e1e36] via-[#0a1426] to-[#080d18] border border-cyan-500/35 hover:border-cyan-400/70 shadow-[0_4px_18px_rgba(6,182,212,0.12)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-                >
-                  <div className="flex items-center space-x-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500/25 to-cyan-500/10 border border-cyan-400/50 shadow-[0_0_14px_rgba(34,211,238,0.25)] flex items-center justify-center shrink-0">
-                      <FileCode2 className="w-5 h-5 text-cyan-300" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-[13.5px] font-bold text-slate-50 truncate">
-                        Trình soạn thảo
-                      </div>
-                      <div className="text-[11px] text-slate-400 truncate">
-                        Viết và chỉnh sửa mã Python
-                      </div>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-                </button>
-              )}
-
-              {onRunCode && (
-                <button
-                  onClick={() => {
-                    onRunCode();
-                    onClose();
-                  }}
-                  className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#092324] via-[#091524] to-[#080d18] border border-emerald-500/35 hover:border-emerald-400/70 shadow-[0_4px_18px_rgba(16,185,129,0.10)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-                >
-                  <div className="flex items-center space-x-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500/25 to-cyan-500/10 border border-emerald-400/50 shadow-[0_0_14px_rgba(16,185,129,0.25)] flex items-center justify-center shrink-0">
-                      <Play className="w-5 h-5 text-emerald-300 fill-emerald-300/20" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-[13.5px] font-bold text-slate-50 truncate">
-                        Chạy mã Python
-                      </div>
-                      <div className="text-[11px] text-slate-400 truncate">
-                        Thực thi chương trình
+          {/* Drawer Body — Ordered strictly per user layout */}
+          <div className="p-3 space-y-3 flex-1">
+            {/* 1. Đăng nhập tài khoản Google */}
+            {(onOpenGoogleWorkspace || onSwitchGoogleAccount) && (
+              <div className="rounded-2xl bg-gradient-to-r from-[#0d213a] via-[#0a1426] to-[#080d18] border border-cyan-500/40 shadow-[0_4px_18px_rgba(56,189,248,0.14)] overflow-hidden">
+                {onOpenGoogleWorkspace && (
+                  <button
+                    onClick={() => {
+                      onOpenGoogleWorkspace();
+                      onClose();
+                    }}
+                    className="w-full text-left px-3 py-2.5 hover:bg-cyan-500/10 flex items-center justify-between gap-2.5 transition"
+                  >
+                    <div className="flex items-center space-x-3 min-w-0">
+                      {googleUser?.photoURL ? (
+                        <img
+                          src={googleUser.photoURL}
+                          alt="Google"
+                          className="w-10 h-10 rounded-xl object-cover border border-cyan-400/60 shrink-0"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500/25 to-blue-600/15 border border-sky-400/50 shadow-[0_0_14px_rgba(56,189,248,0.28)] flex items-center justify-center shrink-0">
+                          <Cloud className="w-5 h-5 text-sky-300" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-bold text-slate-50 truncate">
+                          {googleUser
+                            ? googleUser.displayName || googleUser.email || 'Tài khoản Google'
+                            : 'Đăng nhập tài khoản Google'}
+                        </div>
+                        <div className="text-[11px] text-cyan-300/90 truncate">
+                          {isGoogleConnected
+                            ? googleUser?.email || 'Đã kết nối Drive & Đồng bộ'
+                            : 'Google Drive, Ghi chú & Đồng bộ APK'}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-                </button>
-              )}
-            </div>
-
-            {/* Section: Featured Tools (Dark Premium Cards — Purple, Amber Gold, Cyan) */}
-            <div className="space-y-2">
-              <div className="text-[10.5px] font-bold text-cyan-300/75 uppercase tracking-wider px-1.5">
-                Tính Năng Nổi Bật
-              </div>
-
-              <button
-                onClick={() => {
-                  onOpenPip();
-                  onClose();
-                }}
-                className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#1b1230] via-[#0c1324] to-[#080d18] border border-purple-500/35 hover:border-purple-400/70 shadow-[0_4px_18px_rgba(168,85,247,0.10)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-              >
-                <div className="flex items-center space-x-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/25 to-fuchsia-500/10 border border-purple-400/50 shadow-[0_0_14px_rgba(168,85,247,0.28)] flex items-center justify-center shrink-0">
-                    <Package className="w-5 h-5 text-purple-300" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[13.5px] font-bold text-slate-50 truncate">
-                      Quản lý thư viện Pip
-                    </div>
-                    <div className="text-[11px] text-slate-400 truncate">
-                      Cài đặt và quản lý thư viện
-                    </div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-              </button>
-
-              <button
-                onClick={() => {
-                  onOpenApk();
-                  onClose();
-                }}
-                className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#241a0b] via-[#0d1424] to-[#080d18] border border-amber-500/40 hover:border-amber-400/75 shadow-[0_4px_18px_rgba(245,158,11,0.12)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-              >
-                <div className="flex items-center space-x-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400/25 to-orange-500/10 border border-amber-400/55 shadow-[0_0_14px_rgba(245,158,11,0.30)] flex items-center justify-center shrink-0">
-                    <Smartphone className="w-5 h-5 text-amber-300" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[13.5px] font-bold text-slate-50 truncate">
-                      Đóng gói Android APK
-                    </div>
-                    <div className="text-[11px] text-slate-400 truncate">
-                      Biến Python thành ứng dụng
-                    </div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-              </button>
-
-              <button
-                onClick={() => {
-                  onOpenSamples();
-                  onClose();
-                }}
-                className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#0b232a] via-[#0b1424] to-[#080d18] border border-teal-500/35 hover:border-cyan-400/70 shadow-[0_4px_18px_rgba(20,184,166,0.10)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-              >
-                <div className="flex items-center space-x-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-teal-400/25 to-cyan-500/10 border border-teal-400/50 shadow-[0_0_14px_rgba(20,184,166,0.26)] flex items-center justify-center shrink-0">
-                    <BookOpen className="w-5 h-5 text-teal-300" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[13.5px] font-bold text-slate-50 truncate">
-                      Kho mã mẫu có sẵn
-                    </div>
-                    <div className="text-[11px] text-slate-400 truncate">
-                      Các ví dụ và mẫu code
-                    </div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-              </button>
-            </div>
-
-            {/* Google Account & Drive Sync Card */}
-            {onOpenGoogleWorkspace && (
-              <button
-                onClick={() => {
-                  onOpenGoogleWorkspace();
-                  onClose();
-                }}
-                className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#0d213a] via-[#0a1426] to-[#080d18] border border-cyan-500/40 hover:border-cyan-400/75 shadow-[0_4px_18px_rgba(56,189,248,0.14)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-              >
-                <div className="flex items-center space-x-3 min-w-0">
-                  {googleUser?.photoURL ? (
-                    <img
-                      src={googleUser.photoURL}
-                      alt="Google"
-                      className="w-10 h-10 rounded-xl object-cover border border-cyan-400/60 shrink-0"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500/25 to-blue-600/15 border border-sky-400/50 shadow-[0_0_14px_rgba(56,189,248,0.28)] flex items-center justify-center shrink-0">
-                      <Cloud className="w-5 h-5 text-sky-300" />
-                    </div>
-                  )}
-                  <div className="min-w-0">
-                    <div className="text-[13px] font-bold text-slate-50 truncate">
-                      {googleUser
-                        ? googleUser.displayName || googleUser.email || 'Tài khoản Google'
-                        : 'Đăng nhập Google'}
-                    </div>
-                    <div className="text-[11px] text-cyan-300/90 truncate">
-                      {isGoogleConnected
-                        ? googleUser?.email || 'Đã kết nối Drive & Đồng bộ'
-                        : 'Google Drive, Ghi chú & Đồng bộ APK'}
-                    </div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
-              </button>
-            )}
-
-            {/* Section: Dual Engine */}
-            <div>
-              <div className="text-[10.5px] font-bold text-cyan-300/75 uppercase tracking-wider px-1.5 mb-1.5 flex items-center justify-between">
-                <span>Động Cơ Chạy Mã (Dual Engine)</span>
-                {engine === 'pyodide' ? (
-                  <span className="text-[10px] text-amber-400 font-bold">
-                    Python 3.11 • Offline
-                  </span>
-                ) : (
-                  <span className="text-[10px] text-emerald-400 font-bold">
-                    CPython 3.10
-                  </span>
+                    <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
+                  </button>
                 )}
-              </div>
-              <div className="space-y-1.5 bg-gradient-to-b from-[#0b1324] to-[#080d18] p-2 rounded-2xl border border-cyan-500/25 text-xs">
-                <button
-                  onClick={() => onChangeEngine('pyodide')}
-                  className={`w-full text-left p-2.5 rounded-xl flex items-start space-x-2.5 transition ${
-                    engine === 'pyodide'
-                      ? 'bg-gradient-to-r from-cyan-500/20 to-blue-600/15 text-cyan-100 font-semibold border border-cyan-400/55 shadow-[0_0_16px_rgba(34,211,238,0.14)]'
-                      : 'text-slate-300 hover:bg-[#111c33] border border-transparent'
-                  }`}
-                >
-                  <Globe className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-xs">2. Pyodide WASM (Client)</span>
-                      <span className="text-[10px] text-amber-400 font-semibold shrink-0">Khuyên dùng APK</span>
-                    </div>
-                    <div className="text-[10.5px] text-slate-400 font-normal mt-0.5 leading-snug">
-                      Chạy Python 3.11 trực tiếp trên điện thoại, không cần mạng hay máy chủ.
-                    </div>
-                  </div>
-                </button>
 
-                <button
-                  onClick={() => onChangeEngine('cpython')}
-                  className={`w-full text-left p-2.5 rounded-xl flex items-start space-x-2.5 transition ${
-                    engine === 'cpython'
-                      ? 'bg-gradient-to-r from-emerald-500/20 to-teal-600/15 text-emerald-100 font-semibold border border-emerald-400/55 shadow-[0_0_16px_rgba(16,185,129,0.14)]'
-                      : 'text-slate-300 hover:bg-[#111c33] border border-transparent'
-                  }`}
-                >
-                  <Cpu className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-xs">1. CPython Native (Server)</span>
-                      <span className="text-[10px] text-amber-400 font-normal shrink-0">Cần Máy Chủ</span>
-                    </div>
-                    <div className="text-[10.5px] text-slate-400 font-normal mt-0.5 leading-snug">
-                      Linux Python 3.10 trên máy chủ backend (Web Studio hoặc Server riêng).
-                    </div>
-                  </div>
-                </button>
-
-                {engine === 'cpython' && !activeCustomUrl && isMobileOrApk() && (
-                  <div className="p-2.5 rounded-xl bg-amber-950/35 border border-amber-500/45 text-[11px] text-amber-200 space-y-1.5">
-                    <div className="flex items-center space-x-1.5 font-semibold text-amber-300">
-                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span>Lưu ý trên APK di động:</span>
-                    </div>
-                    <p className="text-[10.5px] text-slate-300 leading-snug">
-                      Chưa đặt URL Server riêng. Chuyển sang <strong>Pyodide WASM</strong> để chạy Offline tức thì.
-                    </p>
+                {onSwitchGoogleAccount && (
+                  <div className="px-3 pb-2.5 pt-2 border-t border-cyan-500/20">
                     <button
-                      onClick={() => onChangeEngine('pyodide')}
-                      className="w-full py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:brightness-110 text-white font-bold text-[11px] flex items-center justify-center space-x-1.5 transition"
+                      onClick={() => {
+                        onSwitchGoogleAccount();
+                        onClose();
+                      }}
+                      className="w-full py-2 px-3 rounded-xl bg-emerald-950/55 hover:bg-emerald-900/55 border border-emerald-500/40 text-emerald-200 font-semibold text-[11px] flex items-center justify-center space-x-1.5 active:scale-[0.98] transition"
                     >
-                      <Globe className="w-3.5 h-3.5" />
-                      <span>Chuyển sang Pyodide WASM</span>
+                      <UserCheck className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>
+                        {googleUser
+                          ? 'Đổi / Đăng nhập tài khoản Google khác'
+                          : 'Chọn tài khoản Google để đăng nhập'}
+                      </span>
                     </button>
                   </div>
                 )}
               </div>
-            </div>
+            )}
 
-            {/* Section: Custom Server & Google Account Switcher */}
+            {/* 2. Tab Máy chủ tùy chỉnh (Đã gỡ nút đăng nhập Google ra khỏi tab này) */}
             <div>
-              <div className="text-[10.5px] font-bold text-cyan-300/75 uppercase tracking-wider px-1.5 mb-1.5 flex items-center justify-between">
-                <span>Máy Chủ Tùy Chỉnh &amp; Google</span>
+              <div className="text-[10.5px] font-bold text-cyan-300/80 uppercase tracking-wider px-1.5 mb-1.5 flex items-center justify-between">
+                <span>Máy Chủ Tùy Chỉnh</span>
                 <button
                   onClick={() => setShowServerConfig((v) => !v)}
                   className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center space-x-1 font-semibold py-0.5"
@@ -540,28 +366,11 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                   <button
                     onClick={() => handleTestConnection()}
                     disabled={testingServer}
-                    className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-cyan-950/70 to-blue-950/60 hover:from-cyan-900/70 hover:to-blue-900/60 border border-cyan-500/45 text-cyan-200 font-semibold text-[11.5px] flex items-center justify-center space-x-2 active:scale-[0.98] transition disabled:opacity-60"
+                    className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-cyan-950/70 to-blue-950/60 hover:from-cyan-900/70 hover:to-blue-900/60 border border-cyan-500/45 text-cyan-200 font-semibold text-[11.5px] flex items-center justify-center space-x-2 active:scale-[0.98] transition disabled:opacity-60"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-cyan-300 ${testingServer ? 'animate-spin' : ''}`} />
                     <span>{testingServer ? 'Đang kiểm tra (tối đa 25s)...' : 'Kiểm tra kết nối máy chủ'}</span>
                   </button>
-
-                  {onSwitchGoogleAccount && (
-                    <button
-                      onClick={() => {
-                        onSwitchGoogleAccount();
-                        onClose();
-                      }}
-                      className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-950/60 to-teal-950/50 hover:from-emerald-900/60 hover:to-teal-900/50 border border-emerald-500/40 text-emerald-200 font-semibold text-[11.5px] flex items-center justify-center space-x-2 active:scale-[0.98] transition"
-                    >
-                      <UserCheck className="w-3.5 h-3.5 text-emerald-300" />
-                      <span>
-                        {googleUser
-                          ? 'Đăng nhập tài khoản Google khác'
-                          : 'Đăng nhập tài khoản Google tùy chọn'}
-                      </span>
-                    </button>
-                  )}
 
                   {onOpenApiKeySettings && (
                     <button
@@ -569,7 +378,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                         onOpenApiKeySettings();
                         onClose();
                       }}
-                      className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-[#1c160d] to-[#121626] hover:from-[#292011] hover:to-[#181e33] border border-amber-500/40 text-amber-200 font-semibold text-[11.5px] flex items-center justify-center space-x-2 active:scale-[0.98] transition"
+                      className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-[#1c160d] to-[#121626] hover:from-[#292011] hover:to-[#181e33] border border-amber-500/40 text-amber-200 font-semibold text-[11.5px] flex items-center justify-center space-x-2 active:scale-[0.98] transition"
                     >
                       <Key className="w-3.5 h-3.5 text-amber-400" />
                       <span>Khóa Gemini API (Tùy chọn)</span>
@@ -664,57 +473,224 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
               </div>
             </div>
 
-            {/* Section: Editor Font Size + Syntax Color Designer */}
+            {/* 3. Tab Động cơ chạy Python — gộp thành 1 tab duy nhất có vách ngăn ở giữa */}
             <div>
-              <div className="text-[10.5px] font-bold text-cyan-300/75 uppercase tracking-wider px-1.5 mb-1.5">
-                Cỡ Chữ &amp; Cài Đặt Trình Soạn Thảo
+              <div className="text-[10.5px] font-bold text-cyan-300/80 uppercase tracking-wider px-1.5 mb-1.5 flex items-center justify-between">
+                <span>Động Cơ Chạy Python</span>
+                <span className="text-[10px] text-amber-400 font-bold">
+                  {engine === 'pyodide' ? 'Python 3.11 • Offline' : 'CPython 3.10 • Server'}
+                </span>
               </div>
-              <div className="p-2.5 bg-gradient-to-b from-[#0b1324] to-[#080d18] rounded-2xl border border-cyan-500/25 space-y-2.5 text-xs">
-                <div className="flex items-center justify-between px-1">
-                  <div>
-                    <div className="text-slate-100 font-semibold text-[12.5px]">Cỡ chữ trình soạn thảo</div>
-                    <div className="text-[10.5px] text-slate-400">Hiện tại: {fontSize}px</div>
-                  </div>
-                  <div className="flex items-center space-x-1.5">
-                    <button
-                      onClick={() => onChangeFontSize(-1)}
-                      className="w-9 h-9 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-slate-700 text-slate-200 flex items-center justify-center transition"
-                      aria-label="Giảm cỡ chữ"
-                    >
-                      <ZoomOut className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => onChangeFontSize(1)}
-                      className="w-9 h-9 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-slate-700 text-slate-200 flex items-center justify-center transition"
-                      aria-label="Tăng cỡ chữ"
-                    >
-                      <ZoomIn className="w-4 h-4" />
-                    </button>
-                  </div>
+
+              <div className="rounded-2xl bg-gradient-to-b from-[#0b1324] to-[#080d18] border border-cyan-500/30 overflow-hidden shadow-[0_4px_18px_rgba(6,182,212,0.08)]">
+                {/* 2-column unified switcher with crisp vertical center divider */}
+                <div className="grid grid-cols-2 divide-x divide-cyan-500/30">
+                  {/* Left: Pyodide WASM */}
+                  <button
+                    onClick={() => onChangeEngine('pyodide')}
+                    className={`p-2.5 text-left transition flex flex-col justify-between gap-1.5 ${
+                      engine === 'pyodide'
+                        ? 'bg-gradient-to-b from-cyan-500/20 to-blue-600/10 text-cyan-50'
+                        : 'text-slate-400 hover:bg-[#101a2f] hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <Globe className={`w-4 h-4 shrink-0 ${engine === 'pyodide' ? 'text-cyan-300' : 'text-slate-500'}`} />
+                      <span
+                        className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded-md ${
+                          engine === 'pyodide'
+                            ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
+                            : 'bg-slate-800/80 text-slate-400'
+                        }`}
+                      >
+                        Offline
+                      </span>
+                    </div>
+                    <div>
+                      <div className="font-bold text-[12px] leading-tight">Pyodide WASM</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                        Chạy trực tiếp trên APK
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* Right: CPython Native */}
+                  <button
+                    onClick={() => onChangeEngine('cpython')}
+                    className={`p-2.5 text-left transition flex flex-col justify-between gap-1.5 ${
+                      engine === 'cpython'
+                        ? 'bg-gradient-to-b from-emerald-500/20 to-teal-600/10 text-emerald-50'
+                        : 'text-slate-400 hover:bg-[#101a2f] hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <Cpu className={`w-4 h-4 shrink-0 ${engine === 'cpython' ? 'text-emerald-300' : 'text-slate-500'}`} />
+                      <span
+                        className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded-md ${
+                          engine === 'cpython'
+                            ? 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
+                            : 'bg-slate-800/80 text-slate-400'
+                        }`}
+                      >
+                        Server
+                      </span>
+                    </div>
+                    <div>
+                      <div className="font-bold text-[12px] leading-tight">CPython 3.10</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                        Linux Native Backend
+                      </div>
+                    </div>
+                  </button>
                 </div>
 
-                <button
-                  onClick={() => {
-                    onOpenSyntaxColor();
-                    onClose();
-                  }}
-                  className="w-full px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#231910] via-[#131428] to-[#0a0f1c] border border-amber-500/40 hover:border-amber-400/70 text-slate-100 font-semibold text-xs flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
-                >
-                  <div className="flex items-center space-x-3 min-w-0">
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400/25 to-purple-500/15 border border-amber-400/50 flex items-center justify-center shrink-0">
-                      <Palette className="w-4.5 h-4.5 text-amber-300" />
+                {engine === 'cpython' && !activeCustomUrl && isMobileOrApk() && (
+                  <div className="p-2.5 border-t border-amber-500/35 bg-amber-950/35 text-[11px] text-amber-200 space-y-1.5">
+                    <div className="flex items-center space-x-1.5 font-semibold text-amber-300">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>Chưa đặt URL Server riêng trên APK</span>
                     </div>
-                    <div className="text-left min-w-0">
-                      <div className="text-[13px] font-bold text-slate-100 truncate">
-                        Tô Màu Văn Bản (Designer)
-                      </div>
-                      <div className="text-[10.5px] text-slate-400 truncate">
-                        Tùy chỉnh bảng màu cú pháp Python
-                      </div>
+                    <button
+                      onClick={() => onChangeEngine('pyodide')}
+                      className="w-full py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-bold text-[11px] flex items-center justify-center space-x-1.5 transition"
+                    >
+                      <Globe className="w-3.5 h-3.5" />
+                      <span>Chuyển nhanh sang Pyodide WASM</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 4. Tab Đóng gói APK (Thêm nút tải về các file cập nhật cần thiết cho mã nguồn cũ) */}
+            <div className="rounded-2xl bg-gradient-to-r from-[#241a0b] via-[#0d1424] to-[#080d18] border border-amber-500/45 shadow-[0_4px_18px_rgba(245,158,11,0.12)] overflow-hidden">
+              <button
+                onClick={() => {
+                  onOpenApk();
+                  onClose();
+                }}
+                className="w-full text-left px-3 py-2.5 hover:bg-amber-500/10 flex items-center justify-between gap-2.5 transition"
+              >
+                <div className="flex items-center space-x-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400/25 to-orange-500/10 border border-amber-400/55 shadow-[0_0_14px_rgba(245,158,11,0.30)] flex items-center justify-center shrink-0">
+                    <Smartphone className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-[13.5px] font-bold text-slate-50 truncate">
+                      Đóng gói Android APK
+                    </div>
+                    <div className="text-[11px] text-slate-400 truncate">
+                      Biến Python thành ứng dụng Android
                     </div>
                   </div>
-                  <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
+                </div>
+                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
+              </button>
+
+              <div className="px-3 pb-2.5 pt-2 border-t border-amber-500/25 space-y-1.5">
+                <button
+                  onClick={handleDownloadUpdateFiles}
+                  disabled={downloadingUpdate}
+                  className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-amber-500/25 to-orange-500/15 hover:from-amber-500/35 hover:to-orange-500/25 border border-amber-400/55 text-amber-200 font-semibold text-[11px] flex items-center justify-center space-x-1.5 active:scale-[0.98] transition disabled:opacity-60"
+                >
+                  {downloadingUpdate ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-300" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5 text-amber-300" />
+                  )}
+                  <span>
+                    {downloadingUpdate
+                      ? 'Đang chuẩn bị gói cập nhật...'
+                      : 'Tải file cập nhật mã nguồn cũ (.ZIP)'}
+                  </span>
                 </button>
+                <p className="text-[10px] text-slate-400 leading-snug px-0.5">
+                  Gồm đủ <span className="font-mono text-amber-300/90">src/</span>, icon mới &amp; <span className="font-mono text-amber-300/90">build-apk.yml</span> để bạn tải lên GitHub bằng Token.
+                </p>
+                {updateNotice && (
+                  <div
+                    className={`p-2 rounded-xl text-[10.5px] border leading-snug ${
+                      updateNotice.ok
+                        ? 'bg-emerald-950/40 border-emerald-500/45 text-emerald-200'
+                        : 'bg-rose-950/40 border-rose-500/45 text-rose-200'
+                    }`}
+                  >
+                    {updateNotice.text}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 5. Quản lý thư viện (Pip) */}
+            <button
+              onClick={() => {
+                onOpenPip();
+                onClose();
+              }}
+              className="w-full text-left px-3 py-2.5 rounded-2xl bg-gradient-to-r from-[#1b1230] via-[#0c1324] to-[#080d18] border border-purple-500/35 hover:border-purple-400/70 shadow-[0_4px_18px_rgba(168,85,247,0.10)] flex items-center justify-between gap-2.5 transition active:scale-[0.99]"
+            >
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/25 to-fuchsia-500/10 border border-purple-400/50 shadow-[0_0_14px_rgba(168,85,247,0.28)] flex items-center justify-center shrink-0">
+                  <Package className="w-5 h-5 text-purple-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13.5px] font-bold text-slate-50 truncate">
+                    Quản lý thư viện Pip
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">
+                    Cài đặt và quản lý thư viện Python
+                  </div>
+                </div>
+              </div>
+              <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
+            </button>
+
+            {/* 6. Tô màu văn bản (và cỡ chữ trình soạn thảo) */}
+            <div className="rounded-2xl bg-gradient-to-r from-[#231910] via-[#101424] to-[#080d18] border border-amber-500/35 overflow-hidden">
+              <button
+                onClick={() => {
+                  onOpenSyntaxColor();
+                  onClose();
+                }}
+                className="w-full px-3 py-2.5 hover:bg-amber-500/10 text-slate-100 font-semibold text-xs flex items-center justify-between gap-2.5 transition"
+              >
+                <div className="flex items-center space-x-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400/25 to-purple-500/15 border border-amber-400/50 shadow-[0_0_14px_rgba(245,158,11,0.20)] flex items-center justify-center shrink-0">
+                    <Palette className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div className="text-left min-w-0">
+                    <div className="text-[13.5px] font-bold text-slate-50 truncate">
+                      Tô Màu Văn Bản (Designer)
+                    </div>
+                    <div className="text-[11px] text-slate-400 truncate">
+                      Tùy chỉnh bảng màu cú pháp Python
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4.5 h-4.5 text-cyan-400 shrink-0" />
+              </button>
+
+              <div className="px-3 py-2 border-t border-cyan-950/60 bg-[#080d18]/75 flex items-center justify-between text-xs">
+                <div>
+                  <div className="text-slate-200 font-semibold text-[11.5px]">Cỡ chữ trình soạn thảo</div>
+                  <div className="text-[10px] text-slate-400">Hiện tại: {fontSize}px</div>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <button
+                    onClick={() => onChangeFontSize(-1)}
+                    className="w-9 h-9 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-slate-700 text-slate-200 flex items-center justify-center transition"
+                    aria-label="Giảm cỡ chữ"
+                  >
+                    <ZoomOut className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => onChangeFontSize(1)}
+                    className="w-9 h-9 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-slate-700 text-slate-200 flex items-center justify-center transition"
+                    aria-label="Tăng cỡ chữ"
+                  >
+                    <ZoomIn className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             </div>
           </div>

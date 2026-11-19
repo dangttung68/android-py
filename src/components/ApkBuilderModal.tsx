@@ -22,6 +22,7 @@ import {
   generateReadme,
   detectRequirements,
 } from '../services/apkGenerator';
+import { downloadProjectUpdateZip } from '../utils/updateBundle';
 
 interface ApkBuilderModalProps {
   isOpen: boolean;
@@ -49,6 +50,8 @@ export const ApkBuilderModal: React.FC<ApkBuilderModalProps> = ({
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [copied, setCopied] = useState(false);
   const [syntaxWarning, setSyntaxWarning] = useState<string | null>(null);
+  const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
+  const [updateStatusMsg, setUpdateStatusMsg] = useState<string | null>(null);
 
   const detectedRequirements = detectRequirements(pythonCode);
 
@@ -125,6 +128,17 @@ finally:
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownloadUpdateBundle = async () => {
+    setIsDownloadingUpdate(true);
+    setUpdateStatusMsg(null);
+    try {
+      const res = await downloadProjectUpdateZip((msg) => setUpdateStatusMsg(msg));
+      setUpdateStatusMsg(res.message);
+    } finally {
+      setIsDownloadingUpdate(false);
+    }
   };
 
   return (
@@ -217,8 +231,26 @@ finally:
                 Phạm vi đóng gói: Chỉ đóng gói đoạn code Python hiện tại thành app riêng
               </div>
               <p className="text-slate-300 text-[11px] leading-relaxed">
-                File APK tạo ở đây là ứng dụng độc lập để chạy riêng đoạn code của bạn (không kèm khung soạn thảo IDE hay AI). Nếu muốn đóng gói <strong className="text-white">toàn bộ ứng dụng Pydroid 3 Web</strong> (đầy đủ trình soạn thảo, AI Gemini, kho mẫu giống hệt bản web), hãy tải toàn bộ mã nguồn dự án lên GitHub và chạy workflow <code className="text-sky-200 font-mono">Xây dựng file APK Android cho Pydroid 3 Web</code> (<code className="text-sky-200 font-mono">Pydroid3-Web-Debug-APK</code>).
+                File APK tạo ở đây là ứng dụng độc lập để chạy riêng đoạn code của bạn (không kèm khung soạn thảo IDE hay AI). Nếu muốn đóng gói <strong className="text-white">toàn bộ ứng dụng Pydroid 3 Web</strong> (đầy đủ trình soạn thảo, AI Gemini, giao diện &amp; icon mới giống hệt bản web), hãy tải gói file cập nhật cho mã nguồn GitHub cũ bên dưới rồi tải lên bằng Token GitHub và chạy workflow <code className="text-sky-200 font-mono">build-apk.yml</code>.
               </p>
+              <div className="pt-1.5 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadUpdateBundle}
+                  disabled={isDownloadingUpdate}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-semibold text-[11px] flex items-center space-x-1.5 transition disabled:opacity-60"
+                >
+                  <Download className="w-3.5 h-3.5 text-amber-300" />
+                  <span>
+                    {isDownloadingUpdate
+                      ? 'Đang nén file cập nhật...'
+                      : 'Tải các file cập nhật cho mã nguồn cũ (.ZIP)'}
+                  </span>
+                </button>
+                {updateStatusMsg && (
+                  <span className="text-[11px] text-emerald-300">{updateStatusMsg}</span>
+                )}
+              </div>
             </div>
           </div>
 

@@ -25,6 +25,7 @@ app.use((req, res, next) => {
     'Access-Control-Allow-Headers',
     'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-gemini-api-key'
   );
+  res.header('Access-Control-Expose-Headers', 'Content-Disposition');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -1193,6 +1194,80 @@ app.get('/api/apk-auth/handoff', (req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, status: 'online' });
+});
+
+function walkDirRecursive(dirPath: string, rootDir: string, outFiles: string[]) {
+  if (!fs.existsSync(dirPath)) return;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git' || entry.name === '.DS_Store') {
+      continue;
+    }
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      walkDirRecursive(full, rootDir, outFiles);
+    } else if (entry.isFile()) {
+      outFiles.push(path.relative(rootDir, full).replace(/\\/g, '/'));
+    }
+  }
+}
+
+// Endpoint: Download essential updated source files as ZIP for updating existing GitHub repository
+app.get('/api/project/update-bundle', async (_req, res) => {
+  try {
+    const { default: JSZip } = await import('jszip');
+    const zip = new JSZip();
+    const rootDir = __dirname;
+
+    const candidateRootFiles = [
+      '.github/workflows/build-apk.yml',
+      'index.html',
+      'package.json',
+      'server.ts',
+      'capacitor.config.json',
+      'tsconfig.json',
+      'vite.config.ts',
+      'metadata.json',
+      'firebase-applet-config.json',
+      'Dockerfile',
+      'public/app-icon.jpg',
+    ];
+
+    const filesToPack = new Set<string>();
+    for (const rel of candidateRootFiles) {
+      const abs = path.join(rootDir, rel);
+      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+        filesToPack.add(rel);
+      }
+    }
+
+    // Collect all source files inside src/
+    const srcFiles: string[] = [];
+    walkDirRecursive(path.join(rootDir, 'src'), rootDir, srcFiles);
+    for (const rel of srcFiles) {
+      filesToPack.add(rel);
+    }
+
+    for (const rel of filesToPack) {
+      const abs = path.join(rootDir, rel);
+      const buf = await fs.promises.readFile(abs);
+      zip.file(rel, buf);
+    }
+
+    const zipBuffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="Pydroid3-Web-Update-Files.zip"');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    console.error('Failed to generate project update bundle:', err);
+    return res.status(500).json({ error: err?.message || 'Không thể đóng gói file cập nhật mã nguồn.' });
+  }
 });
 
 // Start server with Vite middleware in dev or static files in production

@@ -738,11 +738,8 @@ function MainIDEApp() {
         onClose={() => setDrawerOpen(false)}
         engine={engine}
         onChangeEngine={setEngine}
-        onOpenEditor={() => setViewMode('editor')}
-        onRunCode={() => void handleRunCode(undefined, true)}
         onOpenPip={() => setPipModalOpen(true)}
         onOpenApk={() => setApkModalOpen(true)}
-        onOpenSamples={() => setSamplesModalOpen(true)}
         onOpenSyntaxColor={() => setSyntaxModalOpen(true)}
         onOpenApiKeySettings={() => setApiKeyModalOpen(true)}
         onOpenGoogleWorkspace={() => setGoogleModalOpen(true)}

@@ -40,12 +40,12 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="bg-[#070b14] border-b border-cyan-950/70 pt-[env(safe-area-inset-top,0px)] px-1.5 sm:px-3 py-1.5 select-none shrink-0 relative z-30">
-      {/* Single seamless Dark Premium toolbar dock — buttons sit flush together with zero empty gaps */}
-      <div className="h-10 sm:h-11 w-full rounded-2xl bg-gradient-to-r from-[#0b1222] via-[#0e172c] to-[#111527] border border-cyan-500/35 shadow-[0_4px_20px_rgba(6,182,212,0.12)] flex items-stretch overflow-hidden divide-x divide-slate-800/90">
-        {/* Drawer Menu Button */}
+      {/* Dark Premium Editor Toolbar — gently rounded buttons matching reference style, preserving exact app controls */}
+      <div className="w-full flex items-center gap-1.5">
+        {/* Drawer Menu Button (Gently rounded) */}
         <button
           onClick={onToggleDrawer}
-          className="w-10 sm:w-12 h-full bg-[#0e1628] hover:bg-[#15223d] active:bg-[#1a2b4d] text-slate-200 hover:text-cyan-300 flex items-center justify-center transition shrink-0"
+          className="w-9 sm:w-10 h-9 sm:h-10 rounded-xl bg-gradient-to-b from-[#131d33] to-[#0b1222] hover:from-[#192642] hover:to-[#0f182e] border border-cyan-500/35 text-slate-200 hover:text-cyan-300 flex items-center justify-center shadow-sm active:scale-95 transition shrink-0"
           title="Menu Pydroid 3"
           aria-label="Mở menu tùy chọn"
         >
@@ -56,12 +56,12 @@ export const Header: React.FC<HeaderProps> = ({
           </svg>
         </button>
 
-        {/* Primary ▶ RUN CTA (Vibrant yellow, crisp & unmistakable) */}
+        {/* Primary ▶ RUN CTA (Gently rounded amber button) */}
         <button
           onClick={onRun}
           disabled={isRunning}
           title="Chạy mã Python"
-          className="h-full px-3 sm:px-4 bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 hover:from-amber-200 hover:to-amber-400 active:brightness-95 text-slate-950 font-extrabold flex items-center justify-center gap-1 sm:gap-1.5 transition disabled:opacity-60 text-xs sm:text-[13px] shrink-0 tracking-wide shadow-[inset_0_-2px_0_rgba(180,83,9,0.45)]"
+          className="h-9 sm:h-10 px-3 sm:px-3.5 rounded-xl bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 hover:from-amber-200 hover:to-amber-400 active:translate-y-[1px] text-slate-950 font-extrabold flex items-center justify-center gap-1 sm:gap-1.5 border border-amber-200/75 shadow-[0_2px_0_#92400e,0_4px_12px_rgba(245,158,11,0.2)] transition disabled:opacity-60 text-xs sm:text-[13px] shrink-0 tracking-wide"
         >
           {isRunning ? (
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.6">
@@ -75,19 +75,19 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="whitespace-nowrap">{isRunning ? 'CHẠY' : 'RUN'}</span>
         </button>
 
-        {/* Editor </> vs Terminal >_ Segmented Switch (Flush inside dock) */}
-        <div className="h-full flex items-stretch divide-x divide-slate-800/90 shrink-0">
+        {/* Editor </> vs Terminal >_ Segmented Pill Switch (Gently rounded) */}
+        <div className="h-9 sm:h-10 rounded-xl bg-[#0a101d] border border-slate-700/80 p-0.5 flex items-center gap-0.5 shrink-0">
           <button
             onClick={() => onChangeViewMode('editor')}
             title="Trình soạn thảo mã"
             aria-label="Trình soạn thảo"
-            className={`w-9 sm:w-11 h-full flex items-center justify-center transition ${
+            className={`w-8 sm:w-10 h-full rounded-[9px] flex items-center justify-center transition ${
               viewMode === 'editor'
-                ? 'bg-gradient-to-b from-blue-500 to-blue-700 text-white shadow-inner'
-                : 'bg-[#0b1220] text-slate-400 hover:text-slate-100 hover:bg-[#131d33]'
+                ? 'bg-gradient-to-b from-blue-500 to-blue-700 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-100 hover:bg-[#131d33]'
             }`}
           >
-            <svg viewBox="0 0 24 24" className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m8 8-4 4 4 4" />
               <path d="m16 8 4 4-4 4" />
               <path d="m13.5 5-3 14" />
@@ -97,22 +97,25 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => onChangeViewMode('terminal')}
             title="Màn hình Terminal"
             aria-label="Terminal"
-            className={`w-9 sm:w-11 h-full flex items-center justify-center transition ${
+            className={`w-8 sm:w-10 h-full rounded-[9px] flex items-center justify-center transition ${
               viewMode === 'terminal'
-                ? 'bg-gradient-to-b from-cyan-500 to-teal-700 text-white shadow-inner'
-                : 'bg-[#0b1220] text-slate-400 hover:text-slate-100 hover:bg-[#131d33]'
+                ? 'bg-gradient-to-b from-cyan-500 to-teal-700 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-100 hover:bg-[#131d33]'
             }`}
           >
-            <svg viewBox="0 0 24 24" className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m5 7 5 5-5 5" />
               <path d="M12 17h7" />
             </svg>
           </button>
         </div>
 
-        {/* Wider Flush Action Buttons: AI Assistant, Folder (Tệp), Trash (Xóa), Google */}
-        <div className="flex-1 flex items-stretch divide-x divide-slate-800/90 sm:justify-end">
-          {/* AI Assistant / Error Debugger (Wider horizontal tap zone) */}
+        {/* Crisp Vertical Divider */}
+        <div className="w-px h-6 bg-slate-700/80 shrink-0" />
+
+        {/* Right Action Buttons (Gently rounded corners + comfortable wider horizontal tap targets) */}
+        <div className="flex-1 flex items-center gap-1.5 sm:justify-end">
+          {/* AI Assistant / Error Debugger */}
           <button
             onClick={() => onOpenAIAssistant(hasError ? 'debug' : 'chat')}
             onContextMenu={(e) => {
@@ -121,10 +124,10 @@ export const Header: React.FC<HeaderProps> = ({
             }}
             title={`Trợ lý AI & Gỡ lỗi Python (${aiStatusTooltip})`}
             aria-label="Trợ lý AI & Gỡ lỗi"
-            className={`relative flex-1 sm:flex-none sm:w-14 md:w-16 h-full flex items-center justify-center transition active:brightness-110 ${
+            className={`relative flex-1 sm:flex-none sm:w-12 md:w-14 h-9 sm:h-10 rounded-xl border flex items-center justify-center shadow-sm active:scale-95 transition ${
               hasError
-                ? 'bg-gradient-to-b from-rose-600/90 to-rose-800/90 text-amber-300'
-                : 'bg-gradient-to-b from-[#171c2e] to-[#0f1628] hover:from-[#1f2640] hover:to-[#151e36] text-amber-400'
+                ? 'bg-gradient-to-b from-rose-600 to-rose-800 border-rose-400/80 text-amber-200'
+                : 'bg-gradient-to-b from-[#2c2109] to-[#1a1305] hover:from-[#3a2b0d] hover:to-[#221907] border-amber-400/75 text-amber-300'
             }`}
           >
             {hasError ? (
@@ -142,7 +145,7 @@ export const Header: React.FC<HeaderProps> = ({
               </svg>
             )}
             <span
-              className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ring-2 ring-[#0e1526] ${
+              className={`absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-[#070b14] ${
                 aiStatus === 'online'
                   ? 'bg-emerald-400'
                   : aiStatus === 'checking'
@@ -152,24 +155,24 @@ export const Header: React.FC<HeaderProps> = ({
             />
           </button>
 
-          {/* Folder (Tệp & Mã Nguồn) — Wider horizontal width */}
+          {/* Folder (Tệp & Mã Nguồn) */}
           <button
             onClick={onOpenFolderMenu}
             title="Tệp & Mã Nguồn"
             aria-label="Mở Tệp và Mã Nguồn"
-            className="flex-1 sm:flex-none sm:w-14 md:w-16 h-full bg-gradient-to-b from-[#0e2039] to-[#0a162a] hover:from-[#132c4e] hover:to-[#0d1e38] text-cyan-400 hover:text-cyan-300 flex items-center justify-center transition active:brightness-110"
+            className="flex-1 sm:flex-none sm:w-12 md:w-14 h-9 sm:h-10 rounded-xl bg-gradient-to-b from-[#0d2642] to-[#08172b] hover:from-[#123357] hover:to-[#0b203a] border border-cyan-400/70 text-cyan-300 flex items-center justify-center shadow-sm active:scale-95 transition"
           >
             <svg viewBox="0 0 24 24" className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
               <path d="M3 7a2 2 0 0 1 2-2h4.2a2 2 0 0 1 1.56.75L12 7.25A2 2 0 0 0 13.56 8H19a2 2 0 0 1 2 2v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5V7z" />
             </svg>
           </button>
 
-          {/* Trash (Xóa mã / Terminal) — Wider horizontal width */}
+          {/* Trash (Xóa mã / Terminal) */}
           <button
             onClick={onClearCurrentView}
             title={viewMode === 'editor' ? 'Xóa trắng mã trong tệp' : 'Xóa màn hình Terminal'}
             aria-label={viewMode === 'editor' ? 'Xóa mã nguồn' : 'Xóa Terminal'}
-            className="flex-1 sm:flex-none sm:w-14 md:w-16 h-full bg-gradient-to-b from-[#25111c] to-[#1a0d16] hover:from-[#341626] hover:to-[#24111c] text-rose-400 hover:text-rose-300 flex items-center justify-center transition active:brightness-110"
+            className="flex-1 sm:flex-none sm:w-12 md:w-14 h-9 sm:h-10 rounded-xl bg-gradient-to-b from-[#33111f] to-[#1e0a12] hover:from-[#441629] hover:to-[#280e18] border border-rose-400/70 text-rose-300 flex items-center justify-center shadow-sm active:scale-95 transition"
           >
             <svg viewBox="0 0 24 24" className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
               <path d="M4 7h16" />
@@ -179,7 +182,7 @@ export const Header: React.FC<HeaderProps> = ({
             </svg>
           </button>
 
-          {/* Google Account & Drive — Wider horizontal width */}
+          {/* Google Account & Drive */}
           {onOpenGoogleWorkspace && (
             <button
               onClick={onOpenGoogleWorkspace}
@@ -189,17 +192,17 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'Tài khoản Google & Đồng bộ Drive'
               }
               aria-label="Tài khoản Google và Drive"
-              className={`relative flex-1 sm:flex-none sm:w-14 md:w-16 h-full flex items-center justify-center transition active:brightness-110 ${
+              className={`relative flex-1 sm:flex-none sm:w-12 md:w-14 h-9 sm:h-10 rounded-xl border flex items-center justify-center shadow-sm active:scale-95 transition ${
                 isGoogleConnected
-                  ? 'bg-gradient-to-b from-[#0e2638] to-[#0a1a28]'
-                  : 'bg-gradient-to-b from-[#11192e] to-[#0b1222] hover:from-[#17233f] hover:to-[#101a30]'
+                  ? 'bg-gradient-to-b from-[#0f2b3f] to-[#091c2b] border-emerald-400/70'
+                  : 'bg-gradient-to-b from-[#131d33] to-[#0b1222] hover:from-[#1a2744] hover:to-[#101a30] border-sky-400/60'
               }`}
             >
               {googleUser?.photoURL && isGoogleConnected ? (
                 <img
                   src={googleUser.photoURL}
                   alt="Google"
-                  className="w-5.5 h-5.5 rounded-full object-cover ring-1 ring-emerald-400/70"
+                  className="w-5.5 h-5.5 rounded-full object-cover ring-1 ring-emerald-400/80"
                   referrerPolicy="no-referrer"
                 />
               ) : (
@@ -211,7 +214,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </svg>
               )}
               <span
-                className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ring-2 ring-[#0d1424] ${
+                className={`absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-[#070b14] ${
                   isGoogleConnected ? 'bg-emerald-400' : 'bg-slate-400'
                 }`}
               />
