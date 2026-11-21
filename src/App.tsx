@@ -16,7 +16,12 @@ import { GoogleWorkspaceModal } from './components/GoogleWorkspaceModal';
 import { ApkGoogleAuthBridge } from './components/ApkGoogleAuthBridge';
 import { CodeFile, EngineType, ExecutionResult, AIDebugResult } from './types';
 import { SyntaxTheme, DEFAULT_SYNTAX_THEME } from './types/theme';
-import { ShortcutKey, KeySize, DEFAULT_SHORTCUTS } from './types/shortcuts';
+import {
+  ShortcutKey,
+  KeySize,
+  DEFAULT_SHORTCUTS,
+  migrateLegacyPairedShortcuts,
+} from './types/shortcuts';
 import { runPyodideCode, installPyodidePackage, getInstalledPackagesList } from './services/pyodideService';
 import { runCPythonCode } from './services/cpythonService';
 import {
@@ -120,18 +125,18 @@ function MainIDEApp() {
   });
   const [syntaxModalOpen, setSyntaxModalOpen] = useState(false);
 
-  // Keyboard Shortcuts & Size state (Screenshot 4)
+  // Keyboard Shortcuts & Size state (Dark Premium Mobile Bar)
   const [shortcuts, setShortcuts] = useState<ShortcutKey[]>(() => {
     const saved = localStorage.getItem('pydroid_shortcuts');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        return migrateLegacyPairedShortcuts(JSON.parse(saved));
       } catch (e) {}
     }
     return DEFAULT_SHORTCUTS;
   });
   const [keySize, setKeySize] = useState<KeySize>(() => {
-    return (localStorage.getItem('pydroid_keysize') as KeySize) || 'medium';
+    return (localStorage.getItem('pydroid_keysize') as KeySize) || 'large';
   });
   const [shortcutConfigOpen, setShortcutConfigOpen] = useState(false);
 
