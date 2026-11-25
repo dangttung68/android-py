@@ -5,6 +5,9 @@ export interface CodeFile {
   name: string;
   content: string;
   isModified?: boolean;
+  devicePath?: string;
+  nativeUri?: string;
+  sourceType?: 'local' | 'phone' | 'drive';
 }
 
 export interface ExecutionResult {

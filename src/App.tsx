@@ -14,16 +14,46 @@ import { FileManagerModal } from './components/FileManagerModal';
 import { SettingsApiKeyModal } from './components/SettingsApiKeyModal';
 import { GoogleWorkspaceModal } from './components/GoogleWorkspaceModal';
 import { ApkGoogleAuthBridge } from './components/ApkGoogleAuthBridge';
+import { useDebouncedIdeLayout } from './hooks/useDebouncedIdeLayout';
 import { CodeFile, EngineType, ExecutionResult, AIDebugResult } from './types';
-import { SyntaxTheme, DEFAULT_SYNTAX_THEME } from './types/theme';
+import {
+  SyntaxTheme,
+  DEFAULT_SYNTAX_THEME,
+  TerminalTheme,
+  DEFAULT_TERMINAL_THEME,
+  normalizeTerminalTheme,
+} from './types/theme';
 import {
   ShortcutKey,
   KeySize,
   DEFAULT_SHORTCUTS,
   migrateLegacyPairedShortcuts,
 } from './types/shortcuts';
-import { runPyodideCode, installPyodidePackage, getInstalledPackagesList } from './services/pyodideService';
-import { runCPythonCode } from './services/cpythonService';
+import {
+  runPyodideCode,
+  installPyodidePackage,
+  getInstalledPackagesList,
+  getUserInstalledPackageNames,
+  removeUserPipPackage,
+  saveUserPipPackage,
+  mergeSavedPipPackages,
+  exportPipBackupData,
+  restorePipBackupData,
+  prewarmPyodide,
+  prewarmCodeDependencies,
+  precachePyodideCoreAssets,
+  subscribePyodideWarmState,
+  PyodideWarmState,
+} from './services/pyodideService';
+import {
+  runCPythonCode,
+  prewarmCPythonServer,
+  fetchCPythonPipList,
+  installCPythonPipPackage,
+  subscribeCPythonWarmState,
+  resetCPythonWarmState,
+  CPythonWarmState,
+} from './services/cpythonService';
 import {
   requestAIDebugStream,
   requestAIExplainStream,
@@ -37,6 +67,23 @@ import {
 } from './services/googleWorkspaceService';
 import { User } from 'firebase/auth';
 import { isMobileOrApk, hasCustomServer } from './utils/apiConfig';
+import {
+  ensureDefaultFolderExists,
+  getDefaultFolderPath,
+  setDefaultFolderPath,
+  saveActiveFileOverwrite,
+  downloadPyFileToDevice,
+  pickPyFileWithHandle,
+  pickNativeDocumentForEdit,
+  readFileFromDefaultFolder,
+  saveShortcutsConfigToDefaultFolder,
+  loadShortcutsConfigFromDefaultFolder,
+  FullDeviceConfigBackup,
+  FULL_BACKUP_FILENAME,
+  exportFullDeviceConfigBackup,
+  parseFullDeviceConfigBackup,
+  loadFullDeviceConfigFromDefaultFolder,
+} from './services/deviceStorageService';
 
 const DEFAULT_MAIN_PY = `# =========================================================
 #  PYDROID 3 WEB - MÔI TRƯỜNG LẬP TRÌNH PYTHON CHO ANDROID
@@ -109,9 +156,14 @@ function MainIDEApp() {
 
   // View Mode: 'editor' | 'terminal' (matching Screenshots 1 & 2)
   const [viewMode, setViewMode] = useState<'editor' | 'terminal'>('editor');
-  const [fontSize, setFontSize] = useState<number>(14);
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('pydroid_font_size'));
+    return Number.isFinite(saved) && saved >= 11 && saved <= 26 ? saved : 14;
+  });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [highlightLine, setHighlightLine] = useState<number | undefined>(undefined);
+  const [pyodideWarmState, setPyodideWarmState] = useState<PyodideWarmState>('idle');
+  const [cpythonWarmState, setCpythonWarmState] = useState<CPythonWarmState>('idle');
 
   // Syntax Theme state (Screenshot 3)
   const [syntaxTheme, setSyntaxTheme] = useState<SyntaxTheme>(() => {
@@ -122,6 +174,15 @@ function MainIDEApp() {
       } catch (e) {}
     }
     return DEFAULT_SYNTAX_THEME;
+  });
+  const [terminalTheme, setTerminalTheme] = useState<TerminalTheme>(() => {
+    const saved = localStorage.getItem('pydroid_terminal_theme');
+    if (saved) {
+      try {
+        return normalizeTerminalTheme(JSON.parse(saved));
+      } catch (e) {}
+    }
+    return DEFAULT_TERMINAL_THEME;
   });
   const [syntaxModalOpen, setSyntaxModalOpen] = useState(false);
 
@@ -147,6 +208,13 @@ function MainIDEApp() {
   const [sessionInputs, setSessionInputs] = useState<string[]>([]);
   const [isWaitingInput, setIsWaitingInput] = useState(false);
   const [inputPromptText, setInputPromptText] = useState('input():');
+  const [autoClearTerminalOnRun, setAutoClearTerminalOnRun] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('pydroid_terminal_auto_clear') !== 'false';
+    } catch {
+      return true;
+    }
+  });
 
   // Unified AI Assistant Modal (Chat, Debugger, Explainer)
   const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
@@ -161,9 +229,15 @@ function MainIDEApp() {
   const [confirmClearEditorOpen, setConfirmClearEditorOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [pipModalOpen, setPipModalOpen] = useState(false);
-  const [installedPackages, setInstalledPackages] = useState<string[]>([]);
+  const [installedPackages, setInstalledPackages] = useState<string[]>(() =>
+    getInstalledPackagesList()
+  );
+  const [userSavedPackages, setUserSavedPackages] = useState<string[]>(() =>
+    getUserInstalledPackageNames()
+  );
   const [isInstallingPip, setIsInstallingPip] = useState(false);
   const [pipInstallMessage, setPipInstallMessage] = useState('');
+  const [runStatusMessage, setRunStatusMessage] = useState<string | null>(null);
   const [apkModalOpen, setApkModalOpen] = useState(false);
   const [samplesModalOpen, setSamplesModalOpen] = useState(false);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
@@ -211,10 +285,17 @@ function MainIDEApp() {
     return () => unsubscribe();
   }, []);
 
-  // Editor & AI stream abort refs
+  // Editor, execution & AI stream abort refs
   const editorRef = useRef<EditorHandle>(null);
+  const runAbortRef = useRef<AbortController | null>(null);
   const debugAbortRef = useRef<AbortController | null>(null);
   const explainAbortRef = useRef<AbortController | null>(null);
+  const fileHandlesRef = useRef<Map<string, any>>(new Map());
+  const preservedOutputPrefixRef = useRef<{
+    stdout: string;
+    stderr: string;
+    plotImages: string[];
+  }>({ stdout: '', stderr: '', plotImages: [] });
 
   const activeFile = files.find((f) => f.id === activeFileId) || files[0];
 
@@ -237,29 +318,211 @@ function MainIDEApp() {
     } catch (e) {}
   }, []);
 
+  const safeSetStorage = (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {}
+  };
+
   useEffect(() => {
-    localStorage.setItem('pydroid_files', JSON.stringify(files));
+    safeSetStorage('pydroid_files', JSON.stringify(files));
   }, [files]);
 
   useEffect(() => {
-    localStorage.setItem('pydroid_engine', engine);
+    safeSetStorage('pydroid_engine', engine);
   }, [engine]);
 
   useEffect(() => {
-    localStorage.setItem('pydroid_syntax_theme', JSON.stringify(syntaxTheme));
+    safeSetStorage('pydroid_syntax_theme', JSON.stringify(syntaxTheme));
   }, [syntaxTheme]);
 
   useEffect(() => {
-    localStorage.setItem('pydroid_shortcuts', JSON.stringify(shortcuts));
+    safeSetStorage('pydroid_terminal_theme', JSON.stringify(terminalTheme));
+  }, [terminalTheme]);
+
+  useEffect(() => {
+    safeSetStorage('pydroid_terminal_auto_clear', String(autoClearTerminalOnRun));
+  }, [autoClearTerminalOnRun]);
+
+  useEffect(() => {
+    safeSetStorage('pydroid_shortcuts', JSON.stringify(shortcuts));
   }, [shortcuts]);
 
   useEffect(() => {
-    localStorage.setItem('pydroid_keysize', keySize);
+    safeSetStorage('pydroid_keysize', keySize);
   }, [keySize]);
 
   useEffect(() => {
+    safeSetStorage('pydroid_font_size', String(fontSize));
+  }, [fontSize]);
+
+  useEffect(() => {
     setInstalledPackages(getInstalledPackagesList());
+    setUserSavedPackages(getUserInstalledPackageNames());
+    // Ensure default phone folder exists and restore shortcut config from default folder if needed
+    ensureDefaultFolderExists().catch(() => {});
+    if (!localStorage.getItem('pydroid_shortcuts')) {
+      loadShortcutsConfigFromDefaultFolder()
+        .then((cfg) => {
+          if (cfg?.shortcuts && cfg.shortcuts.length > 0) {
+            setShortcuts(cfg.shortcuts);
+          }
+          if (cfg?.keySize) {
+            setKeySize(cfg.keySize);
+          }
+        })
+        .catch(() => {});
+    }
   }, []);
+
+  // Subscribe to warm-up status for both engines
+  useEffect(() => {
+    const unsubPyodide = subscribePyodideWarmState(setPyodideWarmState);
+    const unsubCpython = subscribeCPythonWarmState((state) => setCpythonWarmState(state));
+    return () => {
+      unsubPyodide();
+      unsubCpython();
+    };
+  }, []);
+
+  const secondaryWarmTimerRef = useRef<number | null>(null);
+  const activeFileContentRef = useRef<string>(activeFile?.content || DEFAULT_MAIN_PY);
+  activeFileContentRef.current = activeFile?.content || DEFAULT_MAIN_PY;
+
+  useEffect(() => {
+    return () => {
+      if (secondaryWarmTimerRef.current !== null) {
+        window.clearTimeout(secondaryWarmTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Debounced layout resize listener, coalesced Editor<->Terminal switcher,
+  // and race-safe CPython<->Pyodide engine transition controller
+  const {
+    layoutContainerRef,
+    settledHeight,
+    isLayoutSettling,
+    requestViewModeChange,
+    markUserEngineSwitch,
+  } = useDebouncedIdeLayout({
+    viewMode,
+    setViewMode,
+    engine,
+    initialWarmDelayMs: isMobileOrApk() ? 850 : 120,
+    engineDebounceMs: 200,
+    layoutDebounceMs: 135,
+    onBeforeLeaveEditor: () => {
+      editorRef.current?.blur();
+    },
+    onSettledEngineWarmup: (settledEngine, isStale, isUserSwitch) => {
+      if (secondaryWarmTimerRef.current !== null) {
+        window.clearTimeout(secondaryWarmTimerRef.current);
+        secondaryWarmTimerRef.current = null;
+      }
+
+      const isApk = isMobileOrApk();
+      const customServer = hasCustomServer();
+      const useOfflinePyodide =
+        settledEngine === 'pyodide' || (isApk && !customServer);
+      const seedCode = activeFileContentRef.current || DEFAULT_MAIN_PY;
+
+      if (useOfflinePyodide) {
+        prewarmPyodide(seedCode);
+        if (isUserSwitch && settledEngine === 'cpython' && isApk && !customServer) {
+          showToast('Chưa cấu hình URL Server riêng — sẽ tự chạy Pyodide Offline khi bấm RUN.');
+        }
+      } else {
+        void prewarmCPythonServer({ force: isUserSwitch }).then((res) => {
+          if (isStale()) return;
+          if (isUserSwitch) {
+            if (res.ok) {
+              showToast(
+                `CPython ${res.pythonVersion || '3.10'} đã sẵn sàng${
+                  typeof res.latencyMs === 'number' ? ` (${res.latencyMs}ms)` : ''
+                }!`
+              );
+            } else {
+              showToast('Máy chủ CPython chưa phản hồi — sẽ tự động dự phòng bằng Pyodide WASM.');
+              prewarmPyodide(activeFileContentRef.current || DEFAULT_MAIN_PY);
+            }
+          }
+        });
+      }
+
+      // Lazily pre-cache/warm the secondary engine during idle time so future switches stay fast
+      secondaryWarmTimerRef.current = window.setTimeout(() => {
+        secondaryWarmTimerRef.current = null;
+        if (isStale()) return;
+        if (useOfflinePyodide) {
+          if (!isApk || customServer) {
+            void prewarmCPythonServer();
+          }
+        } else {
+          precachePyodideCoreAssets();
+        }
+      }, isApk ? 2600 : 1800);
+    },
+  });
+
+  // Pre-cache imported packages when user switches to a different file or sample code while Pyodide is ready
+  useEffect(() => {
+    if (pyodideWarmState !== 'ready' || isRunning || !activeFile?.content) return;
+    const timer = setTimeout(() => {
+      void prewarmCodeDependencies(activeFile.content);
+    }, 550);
+    return () => clearTimeout(timer);
+  }, [activeFileId, activeFile?.content, pyodideWarmState, isRunning]);
+
+  // Sync installed package list from CPython server when Pip modal opens in CPython mode
+  useEffect(() => {
+    if (!pipModalOpen) return;
+    setInstalledPackages(getInstalledPackagesList());
+    setUserSavedPackages(getUserInstalledPackageNames());
+    if (engine === 'cpython' && (!isMobileOrApk() || hasCustomServer())) {
+      fetchCPythonPipList().then((serverPkgs) => {
+        if (serverPkgs.length > 0) {
+          const TRACKABLE = new Set([
+            'numpy',
+            'matplotlib',
+            'pandas',
+            'pyfiglet',
+            'colorama',
+            'requests',
+            'sympy',
+            'beautifulsoup4',
+            'scipy',
+            'rich',
+            'pillow',
+          ]);
+          const matched = serverPkgs.filter((p) => TRACKABLE.has(p));
+          if (matched.length > 0) {
+            mergeSavedPipPackages(matched, 'cpython');
+            setInstalledPackages(getInstalledPackagesList());
+            setUserSavedPackages(getUserInstalledPackageNames());
+          }
+        }
+      });
+    }
+  }, [pipModalOpen, engine]);
+
+  const handleChangeEngine = (nextEngine: EngineType) => {
+    if (nextEngine === engine) return;
+    markUserEngineSwitch();
+    setEngine(nextEngine);
+
+    if (nextEngine === 'pyodide') {
+      showToast(
+        pyodideWarmState === 'ready'
+          ? 'Đã chuyển sang Pyodide WASM — Sẵn sàng chạy ngay!'
+          : 'Đã chuyển sang Pyodide WASM — Đang khởi động môi trường...'
+      );
+    } else if (isMobileOrApk() && !hasCustomServer()) {
+      showToast('Chưa cấu hình URL Server riêng — sẽ tự chạy Pyodide Offline khi bấm RUN.');
+    } else {
+      showToast('Đã chuyển sang CPython 3.10 — Đang làm nóng máy chủ...');
+    }
+  };
 
   const handleUpdateContent = (newContent: string) => {
     setFiles((prev) =>
@@ -280,7 +543,7 @@ function MainIDEApp() {
     };
     setFiles((prev) => [...prev, newFile]);
     setActiveFileId(newFile.id);
-    setViewMode('editor');
+    requestViewModeChange('editor', { immediate: true });
   };
 
   const handleRenameFile = (id: string, newName: string) => {
@@ -292,11 +555,351 @@ function MainIDEApp() {
 
   const handleCloseFile = (id: string) => {
     if (files.length <= 1) return;
+    fileHandlesRef.current.delete(id);
     const remaining = files.filter((f) => f.id !== id);
     setFiles(remaining);
     if (activeFileId === id) {
       setActiveFileId(remaining[0].id);
     }
+  };
+
+  // Save: overwrite changes in the editor back into the .py file previously opened from phone
+  const handleSaveActiveFile = async (): Promise<{ ok: boolean; message: string }> => {
+    if (!activeFile) {
+      return { ok: false, message: 'Không có tệp đang mở để lưu.' };
+    }
+    const fileHandle = fileHandlesRef.current.get(activeFile.id);
+    const res = await saveActiveFileOverwrite({
+      fileName: activeFile.name,
+      content: activeFile.content,
+      fileHandle,
+      devicePath: activeFile.devicePath,
+      nativeUri: activeFile.nativeUri,
+    });
+
+    if (res.ok) {
+      const updatedFiles = files.map((f) =>
+        f.id === activeFile.id
+          ? {
+              ...f,
+              isModified: false,
+              devicePath: res.devicePath || f.devicePath,
+              nativeUri: res.nativeUri || f.nativeUri,
+            }
+          : f
+      );
+      setFiles(updatedFiles);
+      try {
+        localStorage.setItem('pydroid_files', JSON.stringify(updatedFiles));
+      } catch {}
+    }
+
+    if (!res.ok) {
+      const errMsg = res.error || `Không thể ghi đè ${activeFile.name}`;
+      showToast(errMsg);
+      return { ok: false, message: errMsg };
+    }
+
+    const msg =
+      res.method === 'local'
+        ? `Đã Save ${activeFile.name} vào bộ nhớ ứng dụng.`
+        : `Đã Save (ghi đè) ${activeFile.name} → ${res.displayPath}`;
+    showToast(msg);
+    return { ok: true, message: msg };
+  };
+
+  const handleDownloadActivePy = async (): Promise<{ ok: boolean; message: string }> => {
+    if (!activeFile) {
+      return { ok: false, message: 'Không có tệp để tải xuống.' };
+    }
+    const res = await downloadPyFileToDevice(activeFile.name, activeFile.content);
+    if (res.ok) {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === activeFile.id
+            ? { ...f, isModified: false, devicePath: res.devicePath }
+            : f
+        )
+      );
+      const msg = res.savedToDefaultFolder
+        ? `Đã tải & lưu ${activeFile.name} vào ${res.displayPath}`
+        : `Đã tải xuống ${activeFile.name} (${res.displayPath})`;
+      showToast(msg);
+      return { ok: true, message: msg };
+    }
+    const errMsg = res.error || `Không thể tải xuống ${activeFile.name}`;
+    showToast(errMsg);
+    return { ok: false, message: errMsg };
+  };
+
+  const openPhoneFileInEditor = (
+    fileName: string,
+    content: string,
+    devicePath?: string,
+    fileHandle?: any,
+    nativeUri?: string
+  ) => {
+    const targetDevicePath = devicePath || `${getDefaultFolderPath()}/${fileName}`;
+    const existing = files.find(
+      (f) =>
+        (nativeUri && f.nativeUri === nativeUri) ||
+        f.devicePath === targetDevicePath ||
+        (f.name === fileName && f.sourceType === 'phone')
+    );
+    if (existing) {
+      if (fileHandle) {
+        fileHandlesRef.current.set(existing.id, fileHandle);
+      }
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === existing.id
+            ? {
+                ...f,
+                name: fileName,
+                content,
+                isModified: false,
+                sourceType: 'phone',
+                devicePath: targetDevicePath,
+                nativeUri: nativeUri ?? f.nativeUri,
+              }
+            : f
+        )
+      );
+      setActiveFileId(existing.id);
+    } else {
+      const newId = Date.now().toString();
+      if (fileHandle) {
+        fileHandlesRef.current.set(newId, fileHandle);
+      }
+      const newFile: CodeFile = {
+        id: newId,
+        name: fileName,
+        content,
+        isModified: false,
+        sourceType: 'phone',
+        devicePath: targetDevicePath,
+        nativeUri,
+      };
+      setFiles((prev) => [...prev, newFile]);
+      setActiveFileId(newId);
+    }
+    setHighlightLine(undefined);
+    requestViewModeChange('editor', { immediate: true });
+  };
+
+  const handlePickPyWithHandle = async (): Promise<boolean> => {
+    const res = await pickPyFileWithHandle();
+    if (!res.supported || res.cancelled || !res.name) {
+      return false;
+    }
+    openPhoneFileInEditor(res.name, res.content || '', undefined, res.fileHandle);
+    showToast(`Đã mở ${res.name} (nhấn Save để ghi đè trực tiếp file này)`);
+    return true;
+  };
+
+  const handlePickPyNative = async (): Promise<{
+    handled: boolean;
+    opened: boolean;
+    error?: string;
+  }> => {
+    const res = await pickNativeDocumentForEdit();
+    if (!res.supported) {
+      return { handled: false, opened: false };
+    }
+    if (res.cancelled) {
+      return { handled: true, opened: false };
+    }
+    if (res.error || !res.name) {
+      return { handled: true, opened: false, error: res.error || 'Không thể mở tệp đã chọn' };
+    }
+    openPhoneFileInEditor(res.name, res.content || '', undefined, undefined, res.uri);
+    showToast(`Đã mở ${res.name} (nhấn Save để ghi đè trực tiếp file trên điện thoại)`);
+    return { handled: true, opened: true };
+  };
+
+  const handleOpenFromDefaultFolder = async (
+    fileName: string,
+    relPath: string
+  ): Promise<{ ok: boolean; message: string }> => {
+    const res = await readFileFromDefaultFolder(fileName, relPath);
+    if (!res.ok) {
+      return { ok: false, message: res.error || `Không thể mở ${fileName}` };
+    }
+    openPhoneFileInEditor(fileName, res.content || '', res.devicePath, res.fileHandle);
+    showToast(`Đã mở ${fileName} từ thư mục mặc định`);
+    return { ok: true, message: `Đã mở ${fileName}` };
+  };
+
+  const handleSyncShortcutsToDefaultFolder = async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    const res = await saveShortcutsConfigToDefaultFolder(shortcuts, keySize);
+    if (res.ok) {
+      const msg = `Đã lưu cấu hình phím tắt vào ${res.displayPath}`;
+      showToast(msg);
+      return { ok: true, message: msg };
+    }
+    const msg = `Đã lưu cấu hình trong ứng dụng (Mặc định APK: Documents/${getDefaultFolderPath()}/pydroid_shortcuts_config.json)`;
+    return { ok: true, message: msg };
+  };
+
+  // Full Device Config Single-File Backup & Restore (Shortcuts + Syntax Theme + Pip)
+  const handleExportFullBackup = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      let userProfileShortcuts: ShortcutKey[] | undefined;
+      try {
+        const rawUserProfile = localStorage.getItem('pydroid_user_shortcuts');
+        if (rawUserProfile) {
+          const parsedProfile = JSON.parse(rawUserProfile);
+          if (Array.isArray(parsedProfile) && parsedProfile.length > 0) {
+            userProfileShortcuts = migrateLegacyPairedShortcuts(parsedProfile);
+          }
+        }
+      } catch {}
+
+      const pipData = await exportPipBackupData();
+      const backup: FullDeviceConfigBackup = {
+        format: 'pydroid3-web-device-config',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        appName: 'Pydroid 3 Web',
+        shortcutsConfig: {
+          shortcuts,
+          userProfileShortcuts,
+          keySize,
+        },
+        syntaxTheme,
+        terminalTheme,
+        editorSettings: {
+          fontSize,
+          engine,
+          defaultFolder: getDefaultFolderPath(),
+        },
+        pipPackages: pipData,
+      };
+
+      const res = await exportFullDeviceConfigBackup(backup);
+      if (!res.ok) {
+        const errMsg = res.error || 'Không thể tạo file sao lưu toàn bộ cấu hình.';
+        showToast(errMsg);
+        return { ok: false, message: errMsg };
+      }
+
+      const skippedNote =
+        pipData.skippedBundlePackages.length > 0
+          ? ` (Ghi chú: ${pipData.skippedBundlePackages.join(', ')} quá lớn nên chỉ lưu tên gói)`
+          : '';
+      const msg = `Đã sao lưu ${shortcuts.length} phím tắt, bảng màu cú pháp & ${pipData.packages.length} thư viện Pip vào 1 file: ${res.displayPath}${skippedNote}`;
+      showToast(`Đã sao lưu toàn bộ cấu hình → ${FULL_BACKUP_FILENAME}`);
+      return { ok: true, message: msg };
+    } catch (err: any) {
+      const errMsg = err?.message || 'Lỗi khi sao lưu cấu hình.';
+      showToast(errMsg);
+      return { ok: false, message: errMsg };
+    }
+  };
+
+  const applyFullConfigBackup = async (backup: FullDeviceConfigBackup) => {
+    const restoredShortcuts =
+      backup.shortcutsConfig.shortcuts.length > 0
+        ? backup.shortcutsConfig.shortcuts
+        : shortcuts;
+
+    if (backup.shortcutsConfig.shortcuts.length > 0) {
+      setShortcuts(restoredShortcuts);
+      safeSetStorage('pydroid_shortcuts', JSON.stringify(restoredShortcuts));
+    }
+
+    setKeySize(backup.shortcutsConfig.keySize);
+    safeSetStorage('pydroid_keysize', backup.shortcutsConfig.keySize);
+
+    if (backup.shortcutsConfig.userProfileShortcuts?.length) {
+      safeSetStorage(
+        'pydroid_user_shortcuts',
+        JSON.stringify(backup.shortcutsConfig.userProfileShortcuts)
+      );
+    }
+
+    setSyntaxTheme(backup.syntaxTheme);
+    safeSetStorage('pydroid_syntax_theme', JSON.stringify(backup.syntaxTheme));
+
+    if (backup.terminalTheme) {
+      const normalizedTerm = normalizeTerminalTheme(backup.terminalTheme);
+      setTerminalTheme(normalizedTerm);
+      safeSetStorage('pydroid_terminal_theme', JSON.stringify(normalizedTerm));
+    }
+
+    setFontSize(backup.editorSettings.fontSize);
+    safeSetStorage('pydroid_font_size', String(backup.editorSettings.fontSize));
+
+    if (backup.editorSettings.defaultFolder) {
+      setDefaultFolderPath(backup.editorSettings.defaultFolder);
+    }
+
+    await saveShortcutsConfigToDefaultFolder(
+      restoredShortcuts,
+      backup.shortcutsConfig.keySize
+    ).catch(() => {});
+
+    const pipRes = await restorePipBackupData(
+      backup.pipPackages.packages,
+      backup.pipPackages.bundles
+    );
+    setInstalledPackages(getInstalledPackagesList());
+    setUserSavedPackages(getUserInstalledPackageNames());
+
+    if (backup.editorSettings.engine && backup.editorSettings.engine !== engine) {
+      handleChangeEngine(backup.editorSettings.engine);
+    }
+
+    return {
+      restoredShortcuts: restoredShortcuts.length,
+      restoredPackages: pipRes.restoredPackages,
+      restoredBundles: pipRes.restoredBundles,
+    };
+  };
+
+  const handleImportFullBackupFile = async (
+    file: File
+  ): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const rawText = await file.text();
+      const parsed = parseFullDeviceConfigBackup(rawText);
+      if (!parsed) {
+        const msg = `File "${file.name}" không phải bản sao lưu cấu hình Pydroid 3 Web hợp lệ.`;
+        showToast(msg);
+        return { ok: false, message: msg };
+      }
+
+      const summary = await applyFullConfigBackup(parsed);
+      const msg = `Đã khôi phục từ "${file.name}": ${summary.restoredShortcuts} phím tắt, bảng màu cú pháp & ${summary.restoredPackages} thư viện Pip${
+        summary.restoredBundles > 0 ? ` (${summary.restoredBundles} gói offline)` : ''
+      }.`;
+      showToast('Đã khôi phục toàn bộ cấu hình máy thành công!');
+      return { ok: true, message: msg };
+    } catch (err: any) {
+      const msg = err?.message || 'Không thể đọc file sao lưu.';
+      showToast(msg);
+      return { ok: false, message: msg };
+    }
+  };
+
+  const handleRestoreFullBackupFromFolder = async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    const res = await loadFullDeviceConfigFromDefaultFolder();
+    if (!res.ok || !res.backup) {
+      const msg = res.error || `Không tìm thấy ${FULL_BACKUP_FILENAME} trong thư mục mặc định.`;
+      showToast(msg);
+      return { ok: false, message: msg };
+    }
+
+    const summary = await applyFullConfigBackup(res.backup);
+    const msg = `Đã khôi phục từ ${res.displayPath}: ${summary.restoredShortcuts} phím tắt, màu cú pháp & ${summary.restoredPackages} thư viện Pip.`;
+    showToast('Đã khôi phục toàn bộ cấu hình từ thư mục mặc định!');
+    return { ok: true, message: msg };
   };
 
   const handleOpenFileFromDrive = (fileName: string, content: string) => {
@@ -316,7 +919,7 @@ function MainIDEApp() {
       setActiveFileId(newFile.id);
     }
     setHighlightLine(undefined);
-    setViewMode('editor');
+    requestViewModeChange('editor', { immediate: true });
   };
 
   const handleApplySyncedWorkspace = (payload: WorkspaceSyncPayload) => {
@@ -328,22 +931,28 @@ function MainIDEApp() {
       setActiveFileId(targetId);
     }
     if (payload.syntaxTheme) setSyntaxTheme(payload.syntaxTheme);
+    if (payload.terminalTheme) setTerminalTheme(normalizeTerminalTheme(payload.terminalTheme));
     if (payload.shortcuts) setShortcuts(payload.shortcuts);
     if (payload.keySize) setKeySize(payload.keySize);
     if (typeof payload.fontSize === 'number') setFontSize(payload.fontSize);
     setHighlightLine(undefined);
-    setViewMode('editor');
+    requestViewModeChange('editor', { immediate: true });
   };
 
-  // Run Code logic (CPython Native or Pyodide WASM) with Real-Time Streaming & Multi-input support
+  // Run Code logic (CPython Native or Pyodide WASM) with rAF-batched Streaming & Multi-input support
   const handleRunCode = async (customInputs?: string[], isFresh = false) => {
     if (isRunning) return;
 
+    runAbortRef.current?.abort();
+    const abortController = new AbortController();
+    runAbortRef.current = abortController;
+
     setIsRunning(true);
+    setRunStatusMessage(null);
     setHighlightLine(undefined);
 
-    // Switch to Terminal view upon clicking RUN
-    setViewMode('terminal');
+    // Switch to Terminal view immediately upon clicking RUN (blurring Editor IME first)
+    requestViewModeChange('terminal', { immediate: true });
 
     const code = activeFile?.content || '';
     let inputsToProvide: string[] = [];
@@ -360,46 +969,114 @@ function MainIDEApp() {
     }
 
     const defaultEngineName = engine === 'cpython' ? 'CPython 3.10 (Native Linux)' : 'Pyodide WASM (Offline)';
-    let currentStdout = isFresh ? '' : (executionResult?.stdout || '');
-    let currentStderr = '';
 
     if (isFresh) {
-      setExecutionResult({
-        stdout: '',
-        stderr: '',
-        exitCode: 0,
-        duration: 0,
-        engine: defaultEngineName,
-        plotImages: [],
-        isWaitingInput: false,
-      });
+      if (autoClearTerminalOnRun) {
+        preservedOutputPrefixRef.current = { stdout: '', stderr: '', plotImages: [] };
+        setExecutionResult({
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          duration: 0,
+          engine: defaultEngineName,
+          plotImages: [],
+          isWaitingInput: false,
+        });
+      } else {
+        const prevStdout = executionResult?.stdout || '';
+        const prevStderr =
+          executionResult?.stderr && executionResult.stderr.trim() !== 'PythonError'
+            ? executionResult.stderr
+            : '';
+        const prevPlots = executionResult?.plotImages || [];
+        const sep =
+          prevStdout.length > 0
+            ? `${prevStdout.endsWith('\n') ? '' : '\n'}────────────────────────\n`
+            : '';
+        preservedOutputPrefixRef.current = {
+          stdout: prevStdout + sep,
+          stderr: prevStderr,
+          plotImages: prevPlots,
+        };
+      }
     }
 
-    // Real-time live streaming callbacks: updates Terminal immediately on every print() or chunk
-    const handleLiveStdout = (chunk: string) => {
-      currentStdout += chunk;
+    const prefix = preservedOutputPrefixRef.current;
+    const currentStdoutChunks: string[] = [];
+    const currentStderrChunks: string[] = [];
+    let currentStdoutCache = '';
+    let currentStderrCache = '';
+    let flushScheduled = false;
+    let flushRafId: number | null = null;
+
+    const getCurrentStdout = () => {
+      if (currentStdoutChunks.length > 0) {
+        currentStdoutCache += currentStdoutChunks.join('');
+        currentStdoutChunks.length = 0;
+      }
+      return currentStdoutCache;
+    };
+
+    const getCurrentStderr = () => {
+      if (currentStderrChunks.length > 0) {
+        currentStderrCache += currentStderrChunks.join('');
+        currentStderrChunks.length = 0;
+      }
+      return currentStderrCache;
+    };
+
+    const mergeRunResult = (nextRes: ExecutionResult): ExecutionResult => {
+      const cleanNextStderr =
+        nextRes.stderr && nextRes.stderr.trim() !== 'PythonError' ? nextRes.stderr : '';
+      const mergedStderr =
+        prefix.stderr && cleanNextStderr
+          ? `${prefix.stderr}\n---\n${cleanNextStderr}`
+          : cleanNextStderr || prefix.stderr;
+      return {
+        ...nextRes,
+        stdout: prefix.stdout + (nextRes.stdout || ''),
+        stderr: mergedStderr,
+        plotImages: [...prefix.plotImages, ...(nextRes.plotImages || [])],
+      };
+    };
+
+    const flushPendingOutput = () => {
+      flushScheduled = false;
+      flushRafId = null;
+      const liveStdout = getCurrentStdout();
+      const liveStderr = getCurrentStderr();
+      const mergedStderr =
+        prefix.stderr && liveStderr
+          ? `${prefix.stderr}\n---\n${liveStderr}`
+          : liveStderr || prefix.stderr;
       setExecutionResult((prev) => ({
-        stdout: currentStdout,
-        stderr: currentStderr || prev?.stderr || '',
-        exitCode: 0,
+        stdout: prefix.stdout + liveStdout,
+        stderr: mergedStderr || (!isFresh ? prev?.stderr || '' : ''),
+        exitCode: liveStderr ? 1 : 0,
         duration: prev?.duration || 0,
         engine: prev?.engine || defaultEngineName,
-        plotImages: prev?.plotImages || [],
+        plotImages: prefix.plotImages,
         isWaitingInput: false,
       }));
     };
 
+    const scheduleFlush = () => {
+      if (flushScheduled) return;
+      flushScheduled = true;
+      flushRafId = requestAnimationFrame(flushPendingOutput);
+    };
+
+    // Batched live streaming callbacks: renders smoothly at display frame rate even under heavy print() loops
+    const handleLiveStdout = (chunk: string) => {
+      if (!chunk) return;
+      currentStdoutChunks.push(chunk);
+      scheduleFlush();
+    };
+
     const handleLiveStderr = (chunk: string) => {
-      currentStderr += chunk;
-      setExecutionResult((prev) => ({
-        stdout: currentStdout,
-        stderr: currentStderr,
-        exitCode: 1,
-        duration: prev?.duration || 0,
-        engine: prev?.engine || defaultEngineName,
-        plotImages: prev?.plotImages || [],
-        isWaitingInput: false,
-      }));
+      if (!chunk) return;
+      currentStderrChunks.push(chunk);
+      scheduleFlush();
     };
 
     try {
@@ -408,19 +1085,23 @@ function MainIDEApp() {
           const wasmRes = await runPyodideCode({
             code,
             inputs: inputsToProvide,
+            signal: abortController.signal,
             onStdout: handleLiveStdout,
             onStderr: handleLiveStderr,
+            onStatus: setRunStatusMessage,
           });
-          setExecutionResult({
-            stdout: wasmRes.stdout,
-            stderr: wasmRes.stderr,
-            exitCode: wasmRes.exitCode,
-            duration: wasmRes.duration,
-            engine: 'Pyodide WASM (Chạy Offline trên thiết bị)',
-            plotImages: wasmRes.plotImages,
-            isWaitingInput: wasmRes.isWaitingInput,
-            prompt: wasmRes.prompt,
-          });
+          setExecutionResult(
+            mergeRunResult({
+              stdout: wasmRes.stdout,
+              stderr: wasmRes.stderr,
+              exitCode: wasmRes.exitCode,
+              duration: wasmRes.duration,
+              engine: 'Pyodide WASM (Chạy Offline trên thiết bị)',
+              plotImages: wasmRes.plotImages,
+              isWaitingInput: wasmRes.isWaitingInput,
+              prompt: wasmRes.prompt,
+            })
+          );
           setIsWaitingInput(!!wasmRes.isWaitingInput);
           if (wasmRes.prompt) {
             setInputPromptText(wasmRes.prompt);
@@ -430,40 +1111,64 @@ function MainIDEApp() {
             const res = await runCPythonCode({
               code,
               inputs: inputsToProvide,
+              signal: abortController.signal,
               onStdout: handleLiveStdout,
               onStderr: handleLiveStderr,
+              onStatus: setRunStatusMessage,
             });
-            setExecutionResult({
-              stdout: res.stdout,
-              stderr: res.stderr,
-              exitCode: res.exitCode,
-              duration: res.duration,
-              engine: res.engine,
-              isWaitingInput: res.isWaitingInput,
-              prompt: res.prompt,
-            });
+            setExecutionResult(
+              mergeRunResult({
+                stdout: res.stdout,
+                stderr: res.stderr,
+                exitCode: res.exitCode,
+                duration: res.duration,
+                engine: res.engine,
+                plotImages: res.plotImages || [],
+                isWaitingInput: res.isWaitingInput,
+                prompt: res.prompt,
+              })
+            );
             setIsWaitingInput(!!res.isWaitingInput);
             if (res.prompt) {
               setInputPromptText(res.prompt);
             }
           } catch (serverErr: any) {
+            if (serverErr?.name === 'AbortError' || abortController.signal.aborted) {
+              setExecutionResult(
+                mergeRunResult({
+                  stdout: getCurrentStdout(),
+                  stderr: getCurrentStderr() || 'Đã dừng thực thi bởi người dùng.',
+                  exitCode: 130,
+                  duration: 0,
+                  engine: 'CPython 3.10 (Native Linux)',
+                  isWaitingInput: false,
+                })
+              );
+              setIsWaitingInput(false);
+              return;
+            }
             console.warn('CPython server error, falling back to Pyodide WASM:', serverErr);
+            setRunStatusMessage('Máy chủ CPython bận, đang chuyển sang Pyodide WASM...');
             const wasmRes = await runPyodideCode({
               code,
               inputs: inputsToProvide,
+              signal: abortController.signal,
               onStdout: handleLiveStdout,
               onStderr: handleLiveStderr,
+              onStatus: setRunStatusMessage,
             });
-            setExecutionResult({
-              stdout: wasmRes.stdout,
-              stderr: wasmRes.stderr,
-              exitCode: wasmRes.exitCode,
-              duration: wasmRes.duration,
-              engine: wasmRes.engine + ' (Tự động chuyển từ CPython)',
-              plotImages: wasmRes.plotImages,
-              isWaitingInput: wasmRes.isWaitingInput,
-              prompt: wasmRes.prompt,
-            });
+            setExecutionResult(
+              mergeRunResult({
+                stdout: wasmRes.stdout,
+                stderr: wasmRes.stderr,
+                exitCode: wasmRes.exitCode,
+                duration: wasmRes.duration,
+                engine: wasmRes.engine + ' (Tự động chuyển từ CPython)',
+                plotImages: wasmRes.plotImages,
+                isWaitingInput: wasmRes.isWaitingInput,
+                prompt: wasmRes.prompt,
+              })
+            );
             setIsWaitingInput(!!wasmRes.isWaitingInput);
             if (wasmRes.prompt) {
               setInputPromptText(wasmRes.prompt);
@@ -474,37 +1179,55 @@ function MainIDEApp() {
         const wasmRes = await runPyodideCode({
           code,
           inputs: inputsToProvide,
+          signal: abortController.signal,
           onStdout: handleLiveStdout,
           onStderr: handleLiveStderr,
+          onStatus: setRunStatusMessage,
         });
-        setExecutionResult({
-          stdout: wasmRes.stdout,
-          stderr: wasmRes.stderr,
-          exitCode: wasmRes.exitCode,
-          duration: wasmRes.duration,
-          engine: wasmRes.engine,
-          plotImages: wasmRes.plotImages,
-          isWaitingInput: wasmRes.isWaitingInput,
-          prompt: wasmRes.prompt,
-        });
+        setExecutionResult(
+          mergeRunResult({
+            stdout: wasmRes.stdout,
+            stderr: wasmRes.stderr,
+            exitCode: wasmRes.exitCode,
+            duration: wasmRes.duration,
+            engine: wasmRes.engine,
+            plotImages: wasmRes.plotImages,
+            isWaitingInput: wasmRes.isWaitingInput,
+            prompt: wasmRes.prompt,
+          })
+        );
         setIsWaitingInput(!!wasmRes.isWaitingInput);
         if (wasmRes.prompt) {
           setInputPromptText(wasmRes.prompt);
         }
       }
     } catch (err: any) {
-      setExecutionResult({
-        stdout: currentStdout,
-        stderr: err?.message || String(err),
-        exitCode: 1,
-        duration: 0,
-        engine: engine === 'cpython' ? 'CPython Native' : 'Pyodide WASM',
-        isWaitingInput: false,
-      });
+      setExecutionResult(
+        mergeRunResult({
+          stdout: getCurrentStdout(),
+          stderr:
+            err?.name === 'AbortError'
+              ? 'Đã dừng thực thi bởi người dùng.'
+              : err?.message || String(err),
+          exitCode: err?.name === 'AbortError' ? 130 : 1,
+          duration: 0,
+          engine: engine === 'cpython' ? 'CPython Native' : 'Pyodide WASM',
+          isWaitingInput: false,
+        })
+      );
       setIsWaitingInput(false);
     } finally {
+      if (flushRafId !== null) {
+        cancelAnimationFrame(flushRafId);
+      }
+      setRunStatusMessage(null);
       setIsRunning(false);
     }
+  };
+
+  const handleStopExecution = () => {
+    runAbortRef.current?.abort();
+    setRunStatusMessage('Đang dừng...');
   };
 
   // Send sequential input from terminal bottom bar
@@ -617,17 +1340,44 @@ function MainIDEApp() {
     setHighlightLine(undefined);
   };
 
-  // Pip
+  // Persistent Pip Package Management (Pyodide WASM + IndexedDB + CPython Server)
   const handleInstallPip = async (pkgName: string) => {
     setIsInstallingPip(true);
-    setPipInstallMessage(`Đang tải gói ${pkgName}...`);
+    setPipInstallMessage(`Đang tải & lưu gói ${pkgName}...`);
     try {
-      await installPyodidePackage(pkgName, (msg) => setPipInstallMessage(msg));
+      const canUseCPythonServer =
+        engine === 'cpython' && (!isMobileOrApk() || hasCustomServer());
+
+      if (canUseCPythonServer) {
+        try {
+          setPipInstallMessage(`Đang cài đặt ${pkgName} trên CPython Server...`);
+          const res = await installCPythonPipPackage(pkgName);
+          saveUserPipPackage(res.packageName || pkgName, 'cpython');
+          // Also best-effort install into Pyodide offline cache when network is available
+          installPyodidePackage(pkgName).catch(() => {});
+        } catch (cpythonErr) {
+          // Fall back to Pyodide WASM + IndexedDB cache if server rejects or is unreachable
+          await installPyodidePackage(pkgName, (msg) => setPipInstallMessage(msg));
+          void cpythonErr;
+        }
+      } else {
+        await installPyodidePackage(pkgName, (msg) => setPipInstallMessage(msg));
+      }
+
       setInstalledPackages(getInstalledPackagesList());
-      setPipInstallMessage(`Đã cài đặt thành công ${pkgName}!`);
+      setUserSavedPackages(getUserInstalledPackageNames());
+      setPipInstallMessage(`Đã cài đặt & lưu thành công ${pkgName}!`);
+      showToast(`Đã lưu thư viện ${pkgName} vào thiết bị!`);
     } finally {
       setIsInstallingPip(false);
     }
+  };
+
+  const handleRemovePip = async (pkgName: string) => {
+    await removeUserPipPackage(pkgName);
+    setInstalledPackages(getInstalledPackagesList());
+    setUserSavedPackages(getUserInstalledPackageNames());
+    showToast(`Đã gỡ ${pkgName} khỏi danh sách đã lưu.`);
   };
 
   // Clear current view (no window.confirm)
@@ -635,6 +1385,7 @@ function MainIDEApp() {
     if (viewMode === 'editor') {
       setConfirmClearEditorOpen(true);
     } else {
+      preservedOutputPrefixRef.current = { stdout: '', stderr: '', plotImages: [] };
       setExecutionResult(null);
       setSessionInputs([]);
       setIsWaitingInput(false);
@@ -665,13 +1416,18 @@ function MainIDEApp() {
       (!!executionResult?.stderr && executionResult.stderr.trim() !== '' && executionResult.stderr.trim() !== 'PythonError'));
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#070b14] text-slate-100 pb-[env(safe-area-inset-bottom,0px)] relative">
+    <div
+      ref={layoutContainerRef}
+      data-layout-settling={isLayoutSettling ? 'true' : 'false'}
+      style={settledHeight ? { height: `${settledHeight}px` } : undefined}
+      className="flex flex-col h-dvh w-screen overflow-hidden bg-[#070b14] text-slate-100 pb-[env(safe-area-inset-bottom,0px)] relative"
+    >
       {/* Top Header Toolbar */}
       <Header
         onRun={() => handleRunCode(undefined, true)}
         isRunning={isRunning}
         viewMode={viewMode}
-        onChangeViewMode={setViewMode}
+        onChangeViewMode={(nextMode) => requestViewModeChange(nextMode)}
         onOpenAIAssistant={handleOpenAIAssistant}
         onOpenFolderMenu={() => setFileManagerOpen(true)}
         onClearCurrentView={handleClearCurrentView}
@@ -691,50 +1447,70 @@ function MainIDEApp() {
         </div>
       )}
 
-      {/* Main Screen: Editor view or Terminal view */}
+      {/* Main Screen: Both Editor & Terminal stay mounted; CSS visibility toggling prevents WebView DOM thrashing */}
       <main className="flex-1 flex flex-col overflow-hidden relative">
-        {viewMode === 'editor' ? (
-          <div className="flex-1 flex flex-col h-full overflow-hidden">
-            <Editor
-              ref={editorRef}
-              activeFile={activeFile}
-              onChangeContent={handleUpdateContent}
-              highlightLine={highlightLine}
-              fontSize={fontSize}
-              theme={syntaxTheme}
-            />
+        <div
+          aria-hidden={viewMode !== 'editor'}
+          className={
+            viewMode === 'editor'
+              ? 'flex-1 flex flex-col h-full overflow-hidden'
+              : 'hidden'
+          }
+        >
+          <Editor
+            ref={editorRef}
+            activeFile={activeFile}
+            onChangeContent={handleUpdateContent}
+            highlightLine={highlightLine}
+            fontSize={fontSize}
+            theme={syntaxTheme}
+            isActive={viewMode === 'editor'}
+          />
 
-            {/* Mobile Keyboard Shortcut Bar */}
-            <MobileKeyboardBar
-              shortcuts={shortcuts}
-              keySize={keySize}
-              onInsertText={(snippet, offset) =>
-                editorRef.current?.insertTextAtCursor(snippet, offset)
-              }
-              onOpenConfig={() => setShortcutConfigOpen(true)}
-            />
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col h-full overflow-hidden">
-            <Terminal
-              result={executionResult}
-              isRunning={isRunning}
-              onRun={(inputs) => handleRunCode(inputs, true)}
-              onClear={() => {
-                setExecutionResult(null);
-                setSessionInputs([]);
-                setIsWaitingInput(false);
-              }}
-              onDebugAI={() => handleOpenAIAssistant('debug')}
-              activeEngine={engine === 'cpython' ? 'CPython 3.10' : 'Pyodide WASM'}
-              onSendInput={handleTerminalInput}
-              isWaitingInput={isWaitingInput}
-              inputPromptText={inputPromptText}
-              preloadedStdin={preloadedStdin}
-              onChangePreloadedStdin={setPreloadedStdin}
-            />
-          </div>
-        )}
+          {/* Mobile Keyboard Shortcut Bar */}
+          <MobileKeyboardBar
+            shortcuts={shortcuts}
+            keySize={keySize}
+            onInsertText={(snippet, offset) =>
+              editorRef.current?.insertTextAtCursor(snippet, offset)
+            }
+            onOpenConfig={() => setShortcutConfigOpen(true)}
+          />
+        </div>
+
+        <div
+          aria-hidden={viewMode !== 'terminal'}
+          className={
+            viewMode === 'terminal'
+              ? 'flex-1 flex flex-col h-full overflow-hidden'
+              : 'hidden'
+          }
+        >
+          <Terminal
+            result={executionResult}
+            isRunning={isRunning}
+            onRun={(inputs) => handleRunCode(inputs, true)}
+            onStop={handleStopExecution}
+            onClear={() => {
+              preservedOutputPrefixRef.current = { stdout: '', stderr: '', plotImages: [] };
+              setExecutionResult(null);
+              setSessionInputs([]);
+              setIsWaitingInput(false);
+            }}
+            onDebugAI={() => handleOpenAIAssistant('debug')}
+            activeEngine={engine === 'cpython' ? 'CPython 3.10' : 'Pyodide WASM'}
+            onSendInput={handleTerminalInput}
+            isWaitingInput={isWaitingInput}
+            inputPromptText={inputPromptText}
+            preloadedStdin={preloadedStdin}
+            onChangePreloadedStdin={setPreloadedStdin}
+            statusMessage={runStatusMessage}
+            terminalTheme={terminalTheme}
+            autoClearOnRun={autoClearTerminalOnRun}
+            onToggleAutoClear={() => setAutoClearTerminalOnRun((prev) => !prev)}
+            isActive={viewMode === 'terminal'}
+          />
+        </div>
       </main>
 
       {/* Side Drawer Menu */}
@@ -742,7 +1518,9 @@ function MainIDEApp() {
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         engine={engine}
-        onChangeEngine={setEngine}
+        onChangeEngine={handleChangeEngine}
+        pyodideWarmState={pyodideWarmState}
+        cpythonWarmState={cpythonWarmState}
         onOpenPip={() => setPipModalOpen(true)}
         onOpenApk={() => setApkModalOpen(true)}
         onOpenSyntaxColor={() => setSyntaxModalOpen(true)}
@@ -751,9 +1529,18 @@ function MainIDEApp() {
         onSwitchGoogleAccount={handleSwitchGoogleAccount}
         googleUser={googleUser}
         hasGoogleToken={hasGoogleToken}
-        onServerUrlChanged={() => handleCheckAiStatus()}
+        onServerUrlChanged={() => {
+          handleCheckAiStatus();
+          resetCPythonWarmState();
+          void prewarmCPythonServer({ force: true });
+        }}
         fontSize={fontSize}
         onChangeFontSize={(delta) => setFontSize((s) => Math.min(26, Math.max(11, s + delta)))}
+        onExportFullBackup={handleExportFullBackup}
+        onImportFullBackupFile={handleImportFullBackupFile}
+        onRestoreFullBackupFromFolder={handleRestoreFullBackupFromFolder}
+        shortcutsCount={shortcuts.length}
+        pipPackagesCount={userSavedPackages.length}
       />
 
       {/* File & Source Manager Modal (Opened from Folder icon next to Trash) */}
@@ -764,40 +1551,25 @@ function MainIDEApp() {
         activeFileId={activeFileId}
         onSelectFile={(id) => {
           setActiveFileId(id);
-          setViewMode('editor');
+          requestViewModeChange('editor', { immediate: true });
         }}
         onCreateFile={handleCreateFile}
         onRenameFile={handleRenameFile}
         onCloseFile={handleCloseFile}
-        onSaveToLocal={() => {
-          localStorage.setItem('pydroid_files', JSON.stringify(files));
-          showToast('Đã lưu mã nguồn vào bộ nhớ máy!');
-        }}
-        onDownloadPy={() => {
-          const blob = new Blob([activeFile?.content || ''], { type: 'text/plain;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = activeFile?.name || 'main.py';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }}
+        onSaveFile={handleSaveActiveFile}
+        onDownloadPy={handleDownloadActivePy}
+        onPickPyWithHandle={handlePickPyWithHandle}
+        onPickPyNative={handlePickPyNative}
+        onOpenFromDefaultFolder={handleOpenFromDefaultFolder}
+        onSyncShortcutsToDefaultFolder={handleSyncShortcutsToDefaultFolder}
         onUploadPy={(e) => {
           const file = e.target.files?.[0];
           if (!file) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
-            const content = ev.target?.result as string;
-            const newFile: CodeFile = {
-              id: Date.now().toString(),
-              name: file.name,
-              content: content || '',
-            };
-            setFiles((prev) => [...prev, newFile]);
-            setActiveFileId(newFile.id);
-            setViewMode('editor');
+            const content = (ev.target?.result as string) || '';
+            openPhoneFileInEditor(file.name, content);
+            showToast(`Đã mở ${file.name} (nhấn Save để lưu ghi đè vào thư mục mặc định)`);
           };
           reader.readAsText(file);
           e.target.value = '';
@@ -807,7 +1579,7 @@ function MainIDEApp() {
           setHighlightLine(undefined);
         }}
         onOpenEditorSearch={() => {
-          setViewMode('editor');
+          requestViewModeChange('editor', { immediate: true });
           setTimeout(() => editorRef.current?.openSearch(), 50);
         }}
         onCopyAllCode={() => {
@@ -867,7 +1639,7 @@ function MainIDEApp() {
         onOpenApiKeySettings={() => setApiKeyModalOpen(true)}
         onInsertCodeToEditor={(snippet) => {
           editorRef.current?.insertTextAtCursor(snippet);
-          setViewMode('editor');
+          requestViewModeChange('editor', { immediate: true });
         }}
       />
 
@@ -877,6 +1649,8 @@ function MainIDEApp() {
         onClose={() => setSyntaxModalOpen(false)}
         currentTheme={syntaxTheme}
         onSaveTheme={setSyntaxTheme}
+        currentTerminalTheme={terminalTheme}
+        onSaveTerminalTheme={setTerminalTheme}
       />
 
       {/* Shortcut Key Configuration Modal (Screenshot 4 - Requirement 4) */}
@@ -896,7 +1670,9 @@ function MainIDEApp() {
         isOpen={pipModalOpen}
         onClose={() => setPipModalOpen(false)}
         installedPackages={installedPackages}
+        userSavedPackages={userSavedPackages}
         onInstallPackage={handleInstallPip}
+        onRemovePackage={handleRemovePip}
         isInstalling={isInstallingPip}
         installMessage={pipInstallMessage}
       />
@@ -915,7 +1691,7 @@ function MainIDEApp() {
         onSelectCode={(code) => {
           handleUpdateContent(code);
           setHighlightLine(undefined);
-          setViewMode('editor');
+          requestViewModeChange('editor', { immediate: true });
         }}
       />
 
@@ -924,7 +1700,11 @@ function MainIDEApp() {
         isOpen={apiKeyModalOpen}
         onClose={() => setApiKeyModalOpen(false)}
         onKeySaved={() => handleCheckAiStatus()}
-        onServerUrlChanged={() => handleCheckAiStatus()}
+        onServerUrlChanged={() => {
+          handleCheckAiStatus();
+          resetCPythonWarmState();
+          void prewarmCPythonServer({ force: true });
+        }}
       />
 
       {/* Google Account, Drive, Notes & Web↔APK Sync Modal */}
@@ -936,6 +1716,7 @@ function MainIDEApp() {
         files={files}
         activeFile={activeFile}
         syntaxTheme={syntaxTheme}
+        terminalTheme={terminalTheme}
         shortcuts={shortcuts}
         keySize={keySize}
         fontSize={fontSize}
@@ -945,12 +1726,16 @@ function MainIDEApp() {
         onApplySyncedWorkspace={handleApplySyncedWorkspace}
         onInsertSnippetToEditor={(snippet) => {
           editorRef.current?.insertTextAtCursor(snippet);
-          setViewMode('editor');
+          requestViewModeChange('editor', { immediate: true });
         }}
         onOpenApiKeySettings={() => setApiKeyModalOpen(true)}
         onOpenApkModal={() => setApkModalOpen(true)}
         onCheckAiStatus={handleCheckAiStatus}
-        onServerUrlChanged={handleCheckAiStatus}
+        onServerUrlChanged={() => {
+          handleCheckAiStatus();
+          resetCPythonWarmState();
+          void prewarmCPythonServer({ force: true });
+        }}
       />
     </div>
   );

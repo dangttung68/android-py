@@ -47,7 +47,7 @@ import {
   setApkAuthEventListener,
 } from '../services/googleWorkspaceService';
 import { CodeFile } from '../types';
-import { SyntaxTheme } from '../types/theme';
+import { SyntaxTheme, TerminalTheme } from '../types/theme';
 import { ShortcutKey, KeySize } from '../types/shortcuts';
 import {
   getApiBaseUrl,
@@ -71,6 +71,7 @@ interface GoogleWorkspaceModalProps {
   files: CodeFile[];
   activeFile: CodeFile;
   syntaxTheme: SyntaxTheme;
+  terminalTheme?: TerminalTheme;
   shortcuts: ShortcutKey[];
   keySize: KeySize;
   fontSize: number;
@@ -109,6 +110,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
   files,
   activeFile,
   syntaxTheme,
+  terminalTheme,
   shortcuts,
   keySize,
   fontSize,
@@ -443,6 +445,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
         activeFileId: activeFile.id,
         files,
         syntaxTheme,
+        terminalTheme,
         shortcuts,
         keySize,
         fontSize,

@@ -2,7 +2,6 @@ name: Xây dựng file APK Android cho Pydroid 3 Web
 
 on:
   push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -15,12 +14,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 2. Cài đặt Java JDK 21 (Bắt buộc cho Capacitor 7 & Gradle 8.14)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: 3. Cài đặt Node.js 22
+      - name: 3. Cài đặt Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -45,6 +44,7 @@ jobs:
           if [ ! -d "android" ]; then
             npx cap add android
           fi
+          rm -rf android/app/src/main/assets/public
           npx cap sync android
           if [ -f "public/app-icon.jpg" ]; then
             python3 -c "import PIL" 2>/dev/null || (sudo apt-get update && sudo apt-get install -y python3-pil)
@@ -127,8 +127,33 @@ jobs:
                   /(<activity[^>]*android:name="\.MainActivity"[^>]*>)/,
                   `$1\n${deepLinkFilter}`
                 );
-                fs.writeFileSync(manifestPath, manifest, "utf8");
               }
+              if (!manifest.includes("WRITE_EXTERNAL_STORAGE")) {
+                const storagePerms = `    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />`;
+                manifest = manifest.replace(
+                  /<application/,
+                  `${storagePerms}\n\n    <application`
+                );
+              }
+              if (!manifest.includes("android.permission.VIBRATE")) {
+                manifest = manifest.replace(
+                  /<application/,
+                  `    <uses-permission android:name="android.permission.VIBRATE" />\n    <application`
+                );
+              }
+              if (!manifest.includes("android:largeHeap")) {
+                manifest = manifest.replace(
+                  /<application\b/,
+                  "<application android:largeHeap=\"true\""
+                );
+              }
+              if (!manifest.includes("android:hardwareAccelerated")) {
+                manifest = manifest.replace(
+                  /<application\b/,
+                  "<application android:hardwareAccelerated=\"true\""
+                );
+              }
+              fs.writeFileSync(manifestPath, manifest, "utf8");
             }
             const p = "android/app/src/main/res/values/styles.xml";
             if (fs.existsSync(p)) {
@@ -141,24 +166,277 @@ jobs:
                 fs.writeFileSync(p, xml, "utf8");
               }
             }
+            const nativePluginPath = "android/app/src/main/java/org/pydroid3/web/NativeStoragePlugin.java";
+            const pluginLines = [
+              "package org.pydroid3.web;",
+              "",
+              "import android.app.Activity;",
+              "import android.content.Intent;",
+              "import android.database.Cursor;",
+              "import android.net.Uri;",
+              "import android.os.ParcelFileDescriptor;",
+              "import android.provider.DocumentsContract;",
+              "import android.provider.OpenableColumns;",
+              "import androidx.activity.result.ActivityResult;",
+              "import com.getcapacitor.JSObject;",
+              "import com.getcapacitor.Plugin;",
+              "import com.getcapacitor.PluginCall;",
+              "import com.getcapacitor.PluginMethod;",
+              "import com.getcapacitor.annotation.ActivityCallback;",
+              "import com.getcapacitor.annotation.CapacitorPlugin;",
+              "import java.io.ByteArrayOutputStream;",
+              "import java.io.FileOutputStream;",
+              "import java.io.InputStream;",
+              "import java.io.OutputStream;",
+              "import java.nio.charset.StandardCharsets;",
+              "",
+              "@CapacitorPlugin(name = \"NativeStorage\")",
+              "public class NativeStoragePlugin extends Plugin {",
+              "",
+              "    private String queryDisplayName(Uri uri) {",
+              "        String name = \"script.py\";",
+              "        try (Cursor cursor = getContext().getContentResolver().query(uri, null, null, null, null)) {",
+              "            if (cursor != null && cursor.moveToFirst()) {",
+              "                int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);",
+              "                if (idx >= 0) {",
+              "                    String val = cursor.getString(idx);",
+              "                    if (val != null && !val.trim().isEmpty()) {",
+              "                        name = val.trim();",
+              "                    }",
+              "                }",
+              "            }",
+              "        } catch (Exception ignored) {}",
+              "        return name;",
+              "    }",
+              "",
+              "    private boolean isUriWritable(Uri uri) {",
+              "        try (Cursor cursor = getContext().getContentResolver().query(uri, new String[]{DocumentsContract.Document.COLUMN_FLAGS}, null, null, null)) {",
+              "            if (cursor != null && cursor.moveToFirst()) {",
+              "                int idx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_FLAGS);",
+              "                if (idx >= 0) {",
+              "                    int flags = cursor.getInt(idx);",
+              "                    return (flags & DocumentsContract.Document.FLAG_SUPPORTS_WRITE) != 0;",
+              "                }",
+              "            }",
+              "        } catch (Exception ignored) {}",
+              "        return true;",
+              "    }",
+              "",
+              "    private void writeTextToUri(Uri uri, String content) throws Exception {",
+              "        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);",
+              "        try (ParcelFileDescriptor pfd = getContext().getContentResolver().openFileDescriptor(uri, \"wt\")) {",
+              "            if (pfd != null) {",
+              "                try (FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor())) {",
+              "                    fos.getChannel().truncate(0);",
+              "                    fos.write(bytes);",
+              "                    fos.flush();",
+              "                    return;",
+              "                }",
+              "            }",
+              "        } catch (Exception ignored) {}",
+              "        try (OutputStream os = getContext().getContentResolver().openOutputStream(uri, \"w\")) {",
+              "            if (os == null) {",
+              "                throw new IllegalStateException(\"Cannot open output stream for URI\");",
+              "            }",
+              "            os.write(bytes);",
+              "            os.flush();",
+              "        }",
+              "    }",
+              "",
+              "    @PluginMethod",
+              "    public void openDocument(PluginCall call) {",
+              "        try {",
+              "            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);",
+              "            intent.addCategory(Intent.CATEGORY_OPENABLE);",
+              "            intent.setType(\"*/*\");",
+              "            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);",
+              "            startActivityForResult(call, intent, \"handleOpenDocumentResult\");",
+              "        } catch (Exception e) {",
+              "            call.reject(\"Không thể mở trình chọn tệp trên thiết bị: \" + e.getMessage(), e);",
+              "        }",
+              "    }",
+              "",
+              "    @ActivityCallback",
+              "    private void handleOpenDocumentResult(PluginCall call, ActivityResult result) {",
+              "        if (call == null) return;",
+              "        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {",
+              "            JSObject cancelled = new JSObject();",
+              "            cancelled.put(\"cancelled\", true);",
+              "            call.resolve(cancelled);",
+              "            return;",
+              "        }",
+              "        Uri uri = result.getData().getData();",
+              "        try {",
+              "            int flags = result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);",
+              "            if (flags == 0) {",
+              "                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;",
+              "            }",
+              "            try {",
+              "                getContext().getContentResolver().takePersistableUriPermission(uri, flags);",
+              "            } catch (Exception e) {",
+              "                try {",
+              "                    getContext().getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);",
+              "                } catch (Exception ignored) {}",
+              "            }",
+              "            String content;",
+              "            try (InputStream is = getContext().getContentResolver().openInputStream(uri)) {",
+              "                if (is == null) {",
+              "                    call.reject(\"Không thể đọc nội dung tệp từ bộ nhớ điện thoại\");",
+              "                    return;",
+              "                }",
+              "                ByteArrayOutputStream buffer = new ByteArrayOutputStream();",
+              "                byte[] chunk = new byte[8192];",
+              "                int n;",
+              "                while ((n = is.read(chunk)) != -1) {",
+              "                    buffer.write(chunk, 0, n);",
+              "                }",
+              "                content = buffer.toString(StandardCharsets.UTF_8.name());",
+              "            }",
+              "            JSObject ret = new JSObject();",
+              "            ret.put(\"cancelled\", false);",
+              "            ret.put(\"uri\", uri.toString());",
+              "            ret.put(\"name\", queryDisplayName(uri));",
+              "            ret.put(\"content\", content);",
+              "            ret.put(\"writable\", isUriWritable(uri));",
+              "            call.resolve(ret);",
+              "        } catch (Exception e) {",
+              "            call.reject(\"Lỗi đọc tệp: \" + e.getMessage(), e);",
+              "        }",
+              "    }",
+              "",
+              "    @PluginMethod",
+              "    public void writeDocument(PluginCall call) {",
+              "        String uriStr = call.getString(\"uri\");",
+              "        String content = call.getString(\"content\", \"\");",
+              "        if (uriStr == null || uriStr.trim().isEmpty()) {",
+              "            call.reject(\"Thiếu URI tệp cần ghi đè\");",
+              "            return;",
+              "        }",
+              "        try {",
+              "            Uri uri = Uri.parse(uriStr);",
+              "            writeTextToUri(uri, content != null ? content : \"\");",
+              "            JSObject ret = new JSObject();",
+              "            ret.put(\"ok\", true);",
+              "            ret.put(\"uri\", uriStr);",
+              "            ret.put(\"name\", queryDisplayName(uri));",
+              "            call.resolve(ret);",
+              "        } catch (Exception e) {",
+              "            call.reject(\"Không thể ghi đè trực tiếp tệp trên máy: \" + e.getMessage(), e);",
+              "        }",
+              "    }",
+              "",
+              "    @PluginMethod",
+              "    public void createDocument(PluginCall call) {",
+              "        try {",
+              "            String fileName = call.getString(\"fileName\", \"main.py\");",
+              "            String mimeType = call.getString(\"mimeType\", \"text/plain\");",
+              "            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);",
+              "            intent.addCategory(Intent.CATEGORY_OPENABLE);",
+              "            intent.setType(mimeType);",
+              "            intent.putExtra(Intent.EXTRA_TITLE, fileName);",
+              "            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);",
+              "            startActivityForResult(call, intent, \"handleCreateDocumentResult\");",
+              "        } catch (Exception e) {",
+              "            call.reject(\"Không thể mở hộp thoại lưu tệp: \" + e.getMessage(), e);",
+              "        }",
+              "    }",
+              "",
+              "    @ActivityCallback",
+              "    private void handleCreateDocumentResult(PluginCall call, ActivityResult result) {",
+              "        if (call == null) return;",
+              "        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {",
+              "            JSObject cancelled = new JSObject();",
+              "            cancelled.put(\"cancelled\", true);",
+              "            call.resolve(cancelled);",
+              "            return;",
+              "        }",
+              "        Uri uri = result.getData().getData();",
+              "        String content = call.getString(\"content\", \"\");",
+              "        String base64 = call.getString(\"base64\");",
+              "        try {",
+              "            try {",
+              "                getContext().getContentResolver().takePersistableUriPermission(",
+              "                    uri,",
+              "                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION",
+              "                );",
+              "            } catch (Exception ignored) {}",
+              "            if (base64 != null && !base64.isEmpty()) {",
+              "                byte[] raw = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);",
+              "                try (OutputStream os = getContext().getContentResolver().openOutputStream(uri, \"w\")) {",
+              "                    if (os == null) throw new IllegalStateException(\"Cannot open output stream\");",
+              "                    os.write(raw);",
+              "                    os.flush();",
+              "                }",
+              "            } else {",
+              "                writeTextToUri(uri, content != null ? content : \"\");",
+              "            }",
+              "            JSObject ret = new JSObject();",
+              "            ret.put(\"cancelled\", false);",
+              "            ret.put(\"uri\", uri.toString());",
+              "            ret.put(\"name\", queryDisplayName(uri));",
+              "            call.resolve(ret);",
+              "        } catch (Exception e) {",
+              "            call.reject(\"Không thể lưu tệp vào vị trí đã chọn: \" + e.getMessage(), e);",
+              "        }",
+              "    }",
+              "}",
+              ""
+            ];
+            fs.writeFileSync(nativePluginPath, pluginLines.join("\n"), "utf8");
+
             const mainAct = "android/app/src/main/java/org/pydroid3/web/MainActivity.java";
             if (fs.existsSync(mainAct)) {
               const lines = [
                 "package org.pydroid3.web;",
                 "",
+                "import android.annotation.TargetApi;",
                 "import android.graphics.Color;",
+                "import android.os.Build;",
                 "import android.os.Bundle;",
                 "import android.view.View;",
+                "import android.view.ViewGroup;",
+                "import android.webkit.RenderProcessGoneDetail;",
+                "import android.webkit.WebView;",
                 "import androidx.core.graphics.Insets;",
                 "import androidx.core.view.ViewCompat;",
                 "import androidx.core.view.WindowCompat;",
                 "import androidx.core.view.WindowInsetsCompat;",
                 "import com.getcapacitor.BridgeActivity;",
+                "import com.getcapacitor.BridgeWebViewClient;",
                 "",
                 "public class MainActivity extends BridgeActivity {",
+                "    private static long lastRendererRecoverMs = 0L;",
+                "",
                 "    @Override",
                 "    protected void onCreate(Bundle savedInstanceState) {",
+                "        registerPlugin(NativeStoragePlugin.class);",
                 "        super.onCreate(savedInstanceState);",
+                "        if (getBridge() != null && getBridge().getWebView() != null) {",
+                "            getBridge().getWebView().setWebViewClient(new BridgeWebViewClient(getBridge()) {",
+                "                @Override",
+                "                @TargetApi(Build.VERSION_CODES.O)",
+                "                public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {",
+                "                    if (view != null) {",
+                "                        if (view.getParent() instanceof ViewGroup) {",
+                "                            ((ViewGroup) view.getParent()).removeView(view);",
+                "                        }",
+                "                        try {",
+                "                            view.destroy();",
+                "                        } catch (Exception ignored) {}",
+                "                    }",
+                "                    long now = System.currentTimeMillis();",
+                "                    if (now - lastRendererRecoverMs > 3000L && !isFinishing() && !isDestroyed()) {",
+                "                        lastRendererRecoverMs = now;",
+                "                        runOnUiThread(() -> {",
+                "                            try {",
+                "                                recreate();",
+                "                            } catch (Exception ignored) {}",
+                "                        });",
+                "                    }",
+                "                    return true;",
+                "                }",
+                "            });",
+                "        }",
                 "        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);",
                 "        getWindow().setStatusBarColor(Color.parseColor(\"#070b14\"));",
                 "        getWindow().setNavigationBarColor(Color.parseColor(\"#070b14\"));",

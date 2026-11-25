@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Send,
   RotateCw,
@@ -13,13 +13,22 @@ import {
   AlertTriangle,
   Image as ImageIcon,
   X,
+  Square,
+  Eraser,
 } from 'lucide-react';
 import { ExecutionResult } from '../types';
+import {
+  TerminalTheme,
+  DEFAULT_TERMINAL_THEME,
+  normalizeTerminalTheme,
+  hexToRgba,
+} from '../types/theme';
 
 interface TerminalProps {
   result: ExecutionResult | null;
   isRunning: boolean;
   onRun: (customInputs?: string[]) => void;
+  onStop?: () => void;
   onClear: () => void;
   onDebugAI: () => void;
   activeEngine: string;
@@ -28,12 +37,18 @@ interface TerminalProps {
   inputPromptText?: string;
   preloadedStdin: string;
   onChangePreloadedStdin: (val: string) => void;
+  statusMessage?: string | null;
+  terminalTheme?: TerminalTheme;
+  autoClearOnRun?: boolean;
+  onToggleAutoClear?: () => void;
+  isActive?: boolean;
 }
 
 export const Terminal: React.FC<TerminalProps> = ({
   result,
   isRunning,
   onRun,
+  onStop,
   onClear,
   onDebugAI,
   activeEngine,
@@ -42,26 +57,55 @@ export const Terminal: React.FC<TerminalProps> = ({
   inputPromptText,
   preloadedStdin,
   onChangePreloadedStdin,
+  statusMessage,
+  terminalTheme,
+  autoClearOnRun = true,
+  onToggleAutoClear,
+  isActive = true,
 }) => {
+  const activeTheme = normalizeTerminalTheme(terminalTheme || DEFAULT_TERMINAL_THEME);
   const [inputValue, setInputValue] = useState('');
   const [showStdinModal, setShowStdinModal] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selectedPlot, setSelectedPlot] = useState<string | null>(null);
   const [dismissedError, setDismissedError] = useState(false);
-  const terminalEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputFieldRef = useRef<HTMLInputElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
-  // Auto-scroll when output changes
+  // Smooth, zero-lag auto-scroll batched to animation frame (only when visible)
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [result?.stdout, result?.stderr, isRunning, isWaitingInput]);
-
-  // Focus bottom input when waiting for user input
-  useEffect(() => {
-    if (isWaitingInput) {
-      inputFieldRef.current?.focus();
+    if (!isActive) {
+      if (document.activeElement === inputFieldRef.current) {
+        inputFieldRef.current?.blur();
+      }
+      return;
     }
-  }, [isWaitingInput]);
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = scrollContainerRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, [isActive, result?.stdout, result?.stderr, isRunning, isWaitingInput, statusMessage]);
+
+  // Focus bottom input when waiting for user input and Terminal is visible
+  useEffect(() => {
+    if (isActive && isWaitingInput) {
+      const timer = window.setTimeout(() => {
+        inputFieldRef.current?.focus();
+      }, 60);
+      return () => window.clearTimeout(timer);
+    }
+  }, [isActive, isWaitingInput]);
 
   // Reset dismissed state whenever a new error occurs
   useEffect(() => {
@@ -86,9 +130,40 @@ export const Terminal: React.FC<TerminalProps> = ({
     }
   };
 
-  const lineCount = ((result?.stdout || '') + (result?.stderr || ''))
-    .split('\n')
-    .filter((l) => l.length > 0).length || (isWaitingInput ? 1 : 0);
+  const MAX_RENDER_CHARS = 150000;
+
+  const { displayedStdout, truncatedKb } = useMemo(() => {
+    const raw = result?.stdout || '';
+    if (raw.length <= MAX_RENDER_CHARS) {
+      return { displayedStdout: raw, truncatedKb: 0 };
+    }
+    const startIdx = raw.length - MAX_RENDER_CHARS;
+    const nextNewline = raw.indexOf('\n', startIdx);
+    const sliceStart = nextNewline !== -1 && nextNewline - startIdx < 4096 ? nextNewline + 1 : startIdx;
+    return {
+      displayedStdout: raw.slice(sliceStart),
+      truncatedKb: Math.max(1, Math.round(sliceStart / 1024)),
+    };
+  }, [result?.stdout]);
+
+  const lineCount = useMemo(() => {
+    const countNonEmpty = (text: string): number => {
+      if (!text) return 0;
+      let count = 0;
+      let lineStart = 0;
+      const len = text.length;
+      for (let i = 0; i < len; i++) {
+        if (text.charCodeAt(i) === 10) {
+          if (i > lineStart) count++;
+          lineStart = i + 1;
+        }
+      }
+      if (len > lineStart) count++;
+      return count;
+    };
+    const total = countNonEmpty(result?.stdout || '') + countNonEmpty(result?.stderr || '');
+    return total || (isWaitingInput ? 1 : 0);
+  }, [result?.stdout, result?.stderr, isWaitingInput]);
 
   const hasError =
     !isWaitingInput &&
@@ -96,23 +171,95 @@ export const Terminal: React.FC<TerminalProps> = ({
       (!!result?.stderr && result.stderr.trim() !== '' && result.stderr.trim() !== 'PythonError'));
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#0a0d14] text-slate-100 select-text font-mono relative overflow-hidden">
+    <div
+      className="flex-1 flex flex-col h-full select-text font-mono relative overflow-hidden"
+      style={
+        {
+          background:
+            activeTheme.backgroundOpacity < 1
+              ? 'radial-gradient(circle at 18% 18%, rgba(14, 165, 233, 0.22) 0%, transparent 48%), radial-gradient(circle at 82% 78%, rgba(168, 85, 247, 0.18) 0%, transparent 48%), #070b14'
+              : '#070b14',
+          color: activeTheme.foreground,
+          '--term-hl-bg': activeTheme.highlightBg,
+          '--term-hl-fg': activeTheme.highlightText,
+        } as React.CSSProperties
+      }
+    >
+      <div
+        className="flex-1 flex flex-col h-full overflow-hidden"
+        style={{
+          backgroundColor: hexToRgba(activeTheme.background, activeTheme.backgroundOpacity),
+          backdropFilter: activeTheme.backgroundOpacity < 1 ? 'blur(8px)' : undefined,
+        }}
+      >
       {/* Subheader matching Screenshot 1 (clean, unbloated) */}
-      <div className="flex items-center justify-between px-3 py-2 bg-[#121622] border-b border-slate-800 text-xs shrink-0 select-none">
+      <div
+        className="flex flex-wrap items-center justify-between gap-1.5 px-3 py-2 border-b border-slate-800/80 text-xs shrink-0 select-none"
+        style={{
+          backgroundColor: hexToRgba(
+            activeTheme.background,
+            Math.min(1, activeTheme.backgroundOpacity + 0.08)
+          ),
+        }}
+      >
         {/* Left: Terminal status indicator + output line count */}
         <div className="flex items-center space-x-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="font-semibold text-slate-200">Terminal</span>
-          <span className="text-[11px] text-slate-400">
+          <span
+            className="w-2.5 h-2.5 rounded-full animate-pulse"
+            style={{ backgroundColor: activeTheme.promptColor }}
+          />
+          <span className="font-semibold" style={{ color: activeTheme.foreground }}>
+            Terminal
+          </span>
+          <span className="text-[11px] opacity-65" style={{ color: activeTheme.foreground }}>
             {lineCount} dòng xuất
           </span>
-          <span className="px-2 py-0.5 rounded-full text-[10px] bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30">
+          <span
+            className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-white/15"
+            style={{
+              backgroundColor: activeTheme.highlightBg,
+              color: activeTheme.highlightText,
+            }}
+          >
             {activeEngine.includes('CPython') ? '• CPYTHON' : '• WASM'}
           </span>
         </div>
 
-        {/* Right: STDIN dropdown button + Copy + Clear + Rerun icon button */}
+        {/* Right: Auto-clear toggle + STDIN dropdown + Copy + Clear + Rerun icon button */}
         <div className="flex items-center space-x-1.5">
+          {onToggleAutoClear && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoClearOnRun}
+              onClick={onToggleAutoClear}
+              title={
+                autoClearOnRun
+                  ? 'Tự động xóa kết quả cũ khi chạy lại (Đang bật)'
+                  : 'Giữ lại kết quả cũ giữa các lần chạy (Đang tắt)'
+              }
+              className={`flex items-center space-x-1.5 px-2 py-1 rounded border text-[11px] font-semibold transition active:scale-95 ${
+                autoClearOnRun
+                  ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 hover:bg-emerald-900/60'
+                  : 'bg-[#1c2232] border-slate-700/80 text-slate-400 hover:text-slate-200 hover:bg-[#252c40]'
+              }`}
+            >
+              <Eraser
+                className={`w-3.5 h-3.5 ${
+                  autoClearOnRun ? 'text-emerald-400' : 'text-slate-500'
+                }`}
+              />
+              <span>Tự xóa</span>
+              <span
+                className={`w-6 h-3.5 rounded-full p-0.5 flex items-center transition-colors ${
+                  autoClearOnRun ? 'bg-emerald-500 justify-end' : 'bg-slate-600 justify-start'
+                }`}
+              >
+                <span className="w-2.5 h-2.5 rounded-full bg-white shadow-xs" />
+              </span>
+            </button>
+          )}
+
           {/* STDIN Button (Screenshot 1) */}
           <button
             onClick={() => setShowStdinModal(!showStdinModal)}
@@ -142,15 +289,26 @@ export const Terminal: React.FC<TerminalProps> = ({
             <Trash2 className="w-3.5 h-3.5" />
           </button>
 
-          {/* Rerun Button (Screenshot 1) */}
-          <button
-            onClick={() => onRun()}
-            disabled={isRunning}
-            title="Chạy lại chương trình"
-            className="p-1.5 rounded bg-[#1c2232] hover:bg-[#252c40] text-emerald-400 hover:text-emerald-300 transition disabled:opacity-40"
-          >
-            <RotateCw className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
-          </button>
+          {/* Rerun / Stop Button */}
+          {isRunning && onStop ? (
+            <button
+              onClick={onStop}
+              title="Dừng chạy"
+              className="px-2 py-1 rounded bg-rose-600/90 hover:bg-rose-500 text-white text-[11px] font-bold flex items-center space-x-1 transition active:scale-95"
+            >
+              <Square className="w-3 h-3 fill-current" />
+              <span>Dừng</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => onRun()}
+              disabled={isRunning}
+              title="Chạy lại chương trình"
+              className="p-1.5 rounded bg-[#1c2232] hover:bg-[#252c40] text-emerald-400 hover:text-emerald-300 transition disabled:opacity-40"
+            >
+              <RotateCw className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -199,29 +357,62 @@ export const Terminal: React.FC<TerminalProps> = ({
       )}
 
       {/* Terminal Main Output Screen */}
-      <div className="flex-1 overflow-y-auto p-3.5 leading-relaxed space-y-2 select-text text-[13px]">
+      <div
+        ref={scrollContainerRef}
+        className="terminal-selectable flex-1 overflow-y-auto p-3.5 leading-relaxed space-y-2 select-text text-[13px]"
+        style={{ color: activeTheme.foreground }}
+      >
         {/* Startup / Placeholder Banner (Screenshot 1) */}
         {!result?.stdout && !result?.stderr && !isRunning && !isWaitingInput && (
-          <div className="text-slate-400 text-xs italic">
-            Nhấn nút <strong className="text-amber-400 font-bold">RUN</strong> để bắt đầu thực thi mã Python...
+          <div className="text-xs italic opacity-75" style={{ color: activeTheme.foreground }}>
+            Nhấn nút{' '}
+            <strong
+              className="font-bold px-1.5 py-0.5 rounded not-italic"
+              style={{
+                backgroundColor: activeTheme.highlightBg,
+                color: activeTheme.highlightText,
+              }}
+            >
+              RUN
+            </strong>{' '}
+            để bắt đầu thực thi mã Python...
           </div>
         )}
 
         {/* Stdout Output */}
-        {result?.stdout && (
-          <pre className="whitespace-pre-wrap break-words text-slate-100 font-mono leading-relaxed">
-            {result.stdout}
-            {isWaitingInput && (
-              <span className="inline-block w-2 h-4 bg-amber-400 align-middle ml-1 animate-pulse" />
+        {displayedStdout && (
+          <>
+            {truncatedKb > 0 && (
+              <div className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/75 text-slate-300 border border-slate-700/70">
+                Đã thu gọn {truncatedKb} KB đầu để Terminal luôn mượt — nhấn nút Sao chép ở trên để lấy toàn bộ kết quả.
+              </div>
             )}
-          </pre>
+            <pre
+              className="whitespace-pre-wrap break-words font-mono leading-relaxed"
+              style={{ color: activeTheme.foreground }}
+            >
+              {displayedStdout}
+              {isWaitingInput && (
+                <span
+                  className="inline-block w-2 h-4 align-middle ml-1 animate-pulse"
+                  style={{ backgroundColor: activeTheme.promptColor }}
+                />
+              )}
+            </pre>
+          </>
         )}
 
         {/* Fallback prompt display if waiting for input with no stdout captured */}
         {isWaitingInput && !result?.stdout && (
-          <div className="text-slate-100 font-mono text-[13px] leading-relaxed flex items-center">
+          <div
+            className="font-mono text-[13px] leading-relaxed flex items-center"
+            style={{ color: activeTheme.foreground }}
+          >
             <span>{inputPromptText || 'input():'}</span>
-            <span className="inline-block w-2 h-4 bg-amber-400 align-middle ml-1 animate-pulse" />
+            <span
+              className="inline-block w-2 h-4 align-middle ml-1 animate-pulse"
+              style={{ backgroundColor: activeTheme.promptColor }}
+            />
           </div>
         )}
 
@@ -271,20 +462,30 @@ export const Terminal: React.FC<TerminalProps> = ({
 
         {/* Clean Stderr / Error Traceback in terminal monospace format (No giant container blocking the screen) */}
         {result?.stderr && !isWaitingInput && result.stderr.trim() !== 'PythonError' && (
-          <div className="text-rose-400 font-mono text-xs whitespace-pre-wrap break-words border-l-2 border-rose-500/80 pl-2.5 my-2 py-0.5 bg-rose-950/20 rounded-r-lg">
+          <div
+            className="font-mono text-xs whitespace-pre-wrap break-words border-l-2 pl-2.5 my-2 py-1 rounded-r-lg"
+            style={{
+              color: activeTheme.errorColor,
+              borderColor: activeTheme.errorColor,
+              backgroundColor: hexToRgba(activeTheme.errorColor, 0.14),
+            }}
+          >
             {result.stderr}
           </div>
         )}
 
         {/* Running status indicator */}
         {isRunning && (
-          <div className="flex items-center space-x-2 text-amber-400 py-1">
-            <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-            <span className="text-xs">Đang thực thi mã nguồn Python...</span>
+          <div className="flex items-center space-x-2 py-1" style={{ color: activeTheme.promptColor }}>
+            <div
+              className="w-2.5 h-2.5 rounded-full animate-ping"
+              style={{ backgroundColor: activeTheme.promptColor }}
+            />
+            <span className="text-xs">
+              {statusMessage || 'Đang thực thi mã nguồn Python...'}
+            </span>
           </div>
         )}
-
-        <div ref={terminalEndRef} />
       </div>
 
       {/* Compact Floating Dismissable Error Pill - ONLY appears when there is a real error */}
@@ -316,23 +517,42 @@ export const Terminal: React.FC<TerminalProps> = ({
       )}
 
       {/* Bottom Input Window matching Screenshot 1: >>> [ Nhập lệnh hoặc tham số vào đây.. ] [ Gửi ✈ ] */}
-      <div className="p-2.5 bg-[#12151f] border-t border-slate-800 shrink-0">
+      <div
+        className="p-2.5 border-t border-slate-800/80 shrink-0"
+        style={{
+          backgroundColor: hexToRgba(
+            activeTheme.background,
+            Math.min(1, activeTheme.backgroundOpacity + 0.06)
+          ),
+        }}
+      >
         {isWaitingInput && (
-          <div className="flex items-center justify-between pb-1.5 px-1 text-[11px] text-amber-300 font-sans">
+          <div
+            className="flex items-center justify-between pb-1.5 px-1 text-[11px] font-sans"
+            style={{ color: activeTheme.promptColor }}
+          >
             <span className="flex items-center space-x-1.5 font-medium">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              <span
+                className="w-2 h-2 rounded-full animate-ping"
+                style={{ backgroundColor: activeTheme.promptColor }}
+              />
               <span>Đang chờ nhập dữ liệu cho chương trình</span>
             </span>
-            <span className="text-[10px] text-slate-400">Nhập xong nhấn Gửi ✈</span>
+            <span className="text-[10px] opacity-75" style={{ color: activeTheme.foreground }}>
+              Nhập xong nhấn Gửi ✈
+            </span>
           </div>
         )}
         <form onSubmit={handleInputSubmit} className="flex items-center space-x-2">
-          {/* >>> prefix in bold yellow */}
-          <span className="text-amber-400 font-bold font-mono text-base shrink-0 select-none">
+          {/* >>> prefix in bold promptColor */}
+          <span
+            className="font-bold font-mono text-base shrink-0 select-none"
+            style={{ color: activeTheme.promptColor }}
+          >
             &gt;&gt;&gt;
           </span>
 
-          {/* Yellow bordered input box matching Screenshot 1 */}
+          {/* Custom bordered input box */}
           <div className="flex-1 relative">
             <input
               ref={inputFieldRef}
@@ -340,11 +560,17 @@ export const Terminal: React.FC<TerminalProps> = ({
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               placeholder={isWaitingInput && inputPromptText ? `Đang chờ: ${inputPromptText}` : "Nhập lệnh hoặc tham số vào đây.."}
-              className={`w-full bg-[#0a0d14] rounded-xl px-3.5 py-2 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none font-mono shadow-inner transition ${
-                isWaitingInput
-                  ? 'border-2 border-amber-400 ring-2 ring-amber-400/20'
-                  : 'border-2 border-amber-400/90 focus:ring-1 focus:ring-amber-400'
+              className={`w-full rounded-xl px-3.5 py-2 text-xs sm:text-sm placeholder-slate-500 focus:outline-none font-mono shadow-inner transition ${
+                isWaitingInput ? 'border-2 ring-2 ring-white/10' : 'border-2'
               }`}
+              style={{
+                backgroundColor: hexToRgba(
+                  activeTheme.background,
+                  Math.min(1, activeTheme.backgroundOpacity + 0.1)
+                ),
+                color: activeTheme.foreground,
+                borderColor: activeTheme.promptColor,
+              }}
             />
           </div>
 
@@ -386,6 +612,7 @@ export const Terminal: React.FC<TerminalProps> = ({
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 };

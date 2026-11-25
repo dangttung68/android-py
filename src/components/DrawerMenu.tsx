@@ -21,6 +21,9 @@ import {
   Trash2,
   Plus,
   Download,
+  Archive,
+  Upload,
+  FolderOpen,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import { EngineType } from '../types';
@@ -36,12 +39,17 @@ import {
   SavedServerEntry,
 } from '../utils/apiConfig';
 import { downloadProjectUpdateZip } from '../utils/updateBundle';
+import { PyodideWarmState } from '../services/pyodideService';
+import { CPythonWarmState, resetCPythonWarmState } from '../services/cpythonService';
+import { FULL_BACKUP_FILENAME, getDefaultFolderPath } from '../services/deviceStorageService';
 
 interface DrawerMenuProps {
   isOpen: boolean;
   onClose: () => void;
   engine: EngineType;
   onChangeEngine: (engine: EngineType) => void;
+  pyodideWarmState?: PyodideWarmState;
+  cpythonWarmState?: CPythonWarmState;
   onOpenPip: () => void;
   onOpenApk: () => void;
   onOpenSyntaxColor: () => void;
@@ -53,6 +61,11 @@ interface DrawerMenuProps {
   onServerUrlChanged?: () => void;
   fontSize: number;
   onChangeFontSize: (delta: number) => void;
+  onExportFullBackup?: () => Promise<{ ok: boolean; message: string }>;
+  onImportFullBackupFile?: (file: File) => Promise<{ ok: boolean; message: string }>;
+  onRestoreFullBackupFromFolder?: () => Promise<{ ok: boolean; message: string }>;
+  shortcutsCount?: number;
+  pipPackagesCount?: number;
 }
 
 export const DrawerMenu: React.FC<DrawerMenuProps> = ({
@@ -60,6 +73,8 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onClose,
   engine,
   onChangeEngine,
+  pyodideWarmState = 'idle',
+  cpythonWarmState = 'idle',
   onOpenPip,
   onOpenApk,
   onOpenSyntaxColor,
@@ -71,6 +86,11 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onServerUrlChanged,
   fontSize,
   onChangeFontSize,
+  onExportFullBackup,
+  onImportFullBackupFile,
+  onRestoreFullBackupFromFolder,
+  shortcutsCount = 0,
+  pipPackagesCount = 0,
 }) => {
   const [testingServer, setTestingServer] = useState(false);
   const [serverStatus, setServerStatus] = useState<{
@@ -85,6 +105,8 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   const [serverHistory, setServerHistory] = useState<SavedServerEntry[]>(() => getSavedServerHistory());
   const [downloadingUpdate, setDownloadingUpdate] = useState(false);
   const [updateNotice, setUpdateNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -146,6 +168,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
     setServerInputUrl(saved.url);
     setServerInputLabel('');
     setServerHistory(getSavedServerHistory());
+    resetCPythonWarmState();
     onServerUrlChanged?.();
     await handleTestConnection(saved.url);
   };
@@ -156,6 +179,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
       setActiveCustomUrl(saved.url);
       setServerInputUrl(saved.url);
       setServerHistory(getSavedServerHistory());
+      resetCPythonWarmState();
       onServerUrlChanged?.();
       await handleTestConnection(saved.url);
     }
@@ -168,6 +192,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
     setActiveCustomUrl(remainingActive);
     if (!remainingActive) {
       setServerInputUrl('');
+      resetCPythonWarmState();
       onServerUrlChanged?.();
     }
   };
@@ -176,6 +201,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
     clearCustomServerUrl();
     setActiveCustomUrl('');
     setServerInputUrl('');
+    resetCPythonWarmState();
     setServerStatus({
       tested: false,
       online: false,
@@ -194,6 +220,44 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
       setUpdateNotice({ ok: res.ok, text: res.message });
     } finally {
       setDownloadingUpdate(false);
+    }
+  };
+
+  const handleExportConfigClick = async () => {
+    if (!onExportFullBackup || backupBusy) return;
+    setBackupBusy(true);
+    setBackupNotice(null);
+    try {
+      const res = await onExportFullBackup();
+      setBackupNotice({ ok: res.ok, text: res.message });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreFromFolderClick = async () => {
+    if (!onRestoreFullBackupFromFolder || backupBusy) return;
+    setBackupBusy(true);
+    setBackupNotice(null);
+    try {
+      const res = await onRestoreFullBackupFromFolder();
+      setBackupNotice({ ok: res.ok, text: res.message });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportConfigFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !onImportFullBackupFile || backupBusy) return;
+    setBackupBusy(true);
+    setBackupNotice(null);
+    try {
+      const res = await onImportFullBackupFile(file);
+      setBackupNotice({ ok: res.ok, text: res.message });
+    } finally {
+      setBackupBusy(false);
     }
   };
 
@@ -511,6 +575,36 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                       <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
                         Chạy trực tiếp trên APK
                       </div>
+                      <div className="mt-1 flex items-center space-x-1 text-[9.5px]">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            pyodideWarmState === 'ready'
+                              ? 'bg-emerald-400'
+                              : pyodideWarmState === 'warming'
+                              ? 'bg-amber-400 animate-pulse'
+                              : pyodideWarmState === 'error'
+                              ? 'bg-rose-400'
+                              : 'bg-slate-500'
+                          }`}
+                        />
+                        <span
+                          className={
+                            pyodideWarmState === 'ready'
+                              ? 'text-emerald-300'
+                              : pyodideWarmState === 'warming'
+                              ? 'text-amber-300'
+                              : 'text-slate-400'
+                          }
+                        >
+                          {pyodideWarmState === 'ready'
+                            ? 'Đã nạp sẵn sàng'
+                            : pyodideWarmState === 'warming'
+                            ? 'Đang khởi động...'
+                            : pyodideWarmState === 'error'
+                            ? 'Cần mạng lần đầu'
+                            : 'Chưa nạp'}
+                        </span>
+                      </div>
                     </div>
                   </button>
 
@@ -539,6 +633,38 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                       <div className="font-bold text-[12px] leading-tight">CPython 3.10</div>
                       <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
                         Linux Native Backend
+                      </div>
+                      <div className="mt-1 flex items-center space-x-1 text-[9.5px]">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            cpythonWarmState === 'ready'
+                              ? 'bg-emerald-400'
+                              : cpythonWarmState === 'warming'
+                              ? 'bg-amber-400 animate-pulse'
+                              : cpythonWarmState === 'offline'
+                              ? 'bg-rose-400'
+                              : 'bg-slate-500'
+                          }`}
+                        />
+                        <span
+                          className={
+                            cpythonWarmState === 'ready'
+                              ? 'text-emerald-300'
+                              : cpythonWarmState === 'warming'
+                              ? 'text-amber-300'
+                              : cpythonWarmState === 'offline'
+                              ? 'text-rose-300'
+                              : 'text-slate-400'
+                          }
+                        >
+                          {cpythonWarmState === 'ready'
+                            ? 'Máy chủ sẵn sàng'
+                            : cpythonWarmState === 'warming'
+                            ? 'Đang kết nối...'
+                            : cpythonWarmState === 'offline'
+                            ? 'Ngoại tuyến'
+                            : 'Chờ kết nối'}
+                        </span>
                       </div>
                     </div>
                   </button>
@@ -600,12 +726,12 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                   )}
                   <span>
                     {downloadingUpdate
-                      ? 'Đang chuẩn bị gói cập nhật...'
+                      ? 'Đang nén gói cập nhật offline...'
                       : 'Tải file cập nhật mã nguồn cũ (.ZIP)'}
                   </span>
                 </button>
                 <p className="text-[10px] text-slate-400 leading-snug px-0.5">
-                  Gồm đủ <span className="font-mono text-amber-300/90">src/</span>, icon mới &amp; <span className="font-mono text-amber-300/90">build-apk.yml</span> để bạn tải lên GitHub bằng Token.
+                  Tạo offline đủ <span className="font-mono text-amber-300/90">src/</span>, icon &amp; <span className="font-mono text-amber-300/90">build-apk.yml</span> (giải nén đè vào gốc repo, hoặc bấm &ldquo;Đóng gói Android APK&rdquo; ở trên để đẩy thẳng bằng Token GitHub).
                 </p>
                 {updateNotice && (
                   <div
@@ -693,6 +819,83 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* 7. Sao lưu toàn bộ cấu hình máy thành 1 file duy nhất */}
+            {onExportFullBackup && (
+              <div className="rounded-2xl bg-gradient-to-b from-[#0d2229] via-[#0b1324] to-[#080d18] border border-teal-500/40 shadow-[0_4px_18px_rgba(20,184,166,0.12)] overflow-hidden">
+                <div className="px-3 py-2.5 flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-teal-400/25 to-cyan-500/10 border border-teal-400/50 shadow-[0_0_14px_rgba(20,184,166,0.25)] flex items-center justify-center shrink-0">
+                    <Archive className="w-5 h-5 text-teal-300" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-bold text-slate-50 leading-tight">
+                      Sao Lưu Cấu Hình Máy (1 File)
+                    </div>
+                    <div className="text-[10.5px] text-teal-300/85 mt-0.5 leading-snug">
+                      Phím tắt ({shortcutsCount}) • Tô màu văn bản • Thư viện Pip ({pipPackagesCount})
+                    </div>
+                  </div>
+                </div>
+
+                <div className="px-3 pb-3 pt-2 border-t border-teal-500/20 space-y-2">
+                  <button
+                    onClick={handleExportConfigClick}
+                    disabled={backupBusy}
+                    className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-600 hover:brightness-110 text-white font-bold text-[11.5px] flex items-center justify-center space-x-2 shadow-md active:scale-[0.98] transition disabled:opacity-60"
+                  >
+                    {backupBusy ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5" />
+                    )}
+                    <span>{backupBusy ? 'Đang đóng gói...' : 'Sao lưu toàn bộ thành 1 file'}</span>
+                  </button>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {onImportFullBackupFile && (
+                      <label className="py-2 px-2 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-cyan-500/35 text-cyan-200 font-semibold text-[11px] flex items-center justify-center space-x-1.5 cursor-pointer active:scale-[0.98] transition">
+                        <Upload className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
+                        <span className="truncate">Khôi phục từ file</span>
+                        <input
+                          type="file"
+                          accept=".json,application/json,text/plain"
+                          onChange={handleImportConfigFileChange}
+                          disabled={backupBusy}
+                          className="hidden"
+                        />
+                      </label>
+                    )}
+
+                    {onRestoreFullBackupFromFolder && (
+                      <button
+                        onClick={handleRestoreFromFolderClick}
+                        disabled={backupBusy}
+                        className="py-2 px-2 rounded-xl bg-[#0e192f] hover:bg-[#162748] border border-emerald-500/35 text-emerald-200 font-semibold text-[11px] flex items-center justify-center space-x-1.5 active:scale-[0.98] transition disabled:opacity-60"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                        <span className="truncate">Từ thư mục máy</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <p className="text-[10px] text-slate-400 leading-snug px-0.5 break-all">
+                    File: <span className="font-mono text-teal-300/90">Documents/{getDefaultFolderPath()}/{FULL_BACKUP_FILENAME}</span>
+                  </p>
+
+                  {backupNotice && (
+                    <div
+                      className={`p-2 rounded-xl text-[10.5px] border leading-snug ${
+                        backupNotice.ok
+                          ? 'bg-emerald-950/40 border-emerald-500/45 text-emerald-200'
+                          : 'bg-rose-950/40 border-rose-500/45 text-rose-200'
+                      }`}
+                    >
+                      {backupNotice.text}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dark Premium Drawer Footer */}

@@ -14,7 +14,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { CodeFile } from '../types';
-import { SyntaxTheme } from '../types/theme';
+import { SyntaxTheme, TerminalTheme } from '../types/theme';
 import { ShortcutKey, KeySize } from '../types/shortcuts';
 import {
   getApiBaseUrl,
@@ -190,6 +190,7 @@ export interface WorkspaceSyncPayload {
   activeFileId: string;
   files: CodeFile[];
   syntaxTheme?: SyntaxTheme;
+  terminalTheme?: TerminalTheme;
   shortcuts?: ShortcutKey[];
   keySize?: KeySize;
   fontSize?: number;

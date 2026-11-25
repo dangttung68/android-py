@@ -5,14 +5,15 @@ import {
   Download,
   Github,
   CheckCircle2,
-  Cpu,
   Layers,
   FileCode,
   Shield,
   HelpCircle,
   Copy,
   Check,
-  Sparkles,
+  UploadCloud,
+  RefreshCw,
+  ExternalLink,
 } from 'lucide-react';
 import { ApkConfig } from '../types';
 import {
@@ -22,7 +23,9 @@ import {
   generateReadme,
   detectRequirements,
 } from '../services/apkGenerator';
+import { checkPythonSyntaxWithPyodide } from '../services/pyodideService';
 import { downloadProjectUpdateZip } from '../utils/updateBundle';
+import { pushProjectUpdateToGitHub } from '../utils/githubUpdater';
 
 interface ApkBuilderModalProps {
   isOpen: boolean;
@@ -48,10 +51,28 @@ export const ApkBuilderModal: React.FC<ApkBuilderModalProps> = ({
   const [activeTab, setActiveTab] = useState<'guide' | 'spec' | 'workflow' | 'readme'>('guide');
   const [isGenerating, setIsGenerating] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+  const [zipErrorMsg, setZipErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [syntaxWarning, setSyntaxWarning] = useState<string | null>(null);
   const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
-  const [updateStatusMsg, setUpdateStatusMsg] = useState<string | null>(null);
+  const [updateStatusMsg, setUpdateStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const [showGithubPush, setShowGithubPush] = useState(false);
+  const [ghRepoInput, setGhRepoInput] = useState<string>(() => {
+    try {
+      return localStorage.getItem('pydroid_github_update_repo') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [ghBranchInput, setGhBranchInput] = useState('');
+  const [ghTokenInput, setGhTokenInput] = useState('');
+  const [isPushingGithub, setIsPushingGithub] = useState(false);
+  const [ghPushResult, setGhPushResult] = useState<{
+    ok: boolean;
+    text: string;
+    actionsUrl?: string;
+  } | null>(null);
 
   const detectedRequirements = detectRequirements(pythonCode);
 
@@ -61,28 +82,33 @@ export const ApkBuilderModal: React.FC<ApkBuilderModalProps> = ({
       setSyntaxWarning('Trình soạn thảo đang trống. Hãy nhập mã Python trước khi đóng gói APK.');
       return;
     }
-    const pyodide = window.pyodideInstance;
-    if (pyodide) {
-      try {
-        pyodide.globals.set('__apk_syntax_check', pythonCode);
-        pyodide.runPython(`
-import ast
-try:
-    ast.parse(__apk_syntax_check)
-finally:
-    del __apk_syntax_check
-`);
-        setSyntaxWarning(null);
-      } catch (err: any) {
-        const msg = String(err?.message || err || '');
-        const match = msg.match(/SyntaxError:.*|IndentationError:.*/);
-        setSyntaxWarning(match ? match[0] : 'Phát hiện lỗi cú pháp Python trong mã nguồn hiện tại.');
+
+    let cancelled = false;
+    (async () => {
+      const check = await checkPythonSyntaxWithPyodide(pythonCode);
+      if (cancelled) return;
+      if (check.checked) {
+        if (check.error) {
+          const match = check.error.match(/SyntaxError:.*|IndentationError:.*/);
+          setSyntaxWarning(match ? match[0] : 'Phát hiện lỗi cú pháp Python trong mã nguồn hiện tại.');
+        } else {
+          setSyntaxWarning(null);
+        }
+        return;
       }
-    } else if (/^\s*for\s+so\s+in\s+danh_sach\s*$/m.test(pythonCode)) {
-      setSyntaxWarning('SyntaxError: Dòng "for so in danh_sach" đang thiếu dấu hai chấm (:). Đây là mã mẫu cố tình tạo lỗi để thử AI Debugger — hãy sửa lỗi hoặc chọn mã mẫu khác trước khi đóng gói APK.');
-    } else {
-      setSyntaxWarning(null);
-    }
+
+      if (/^\s*for\s+so\s+in\s+danh_sach\s*$/m.test(pythonCode)) {
+        setSyntaxWarning(
+          'SyntaxError: Dòng "for so in danh_sach" đang thiếu dấu hai chấm (:). Đây là mã mẫu cố tình tạo lỗi để thử AI Debugger — hãy sửa lỗi hoặc chọn mã mẫu khác trước khi đóng gói APK.'
+        );
+      } else {
+        setSyntaxWarning(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, pythonCode]);
 
   if (!isOpen) return null;
@@ -102,6 +128,7 @@ finally:
   const handleDownloadZip = async () => {
     setIsGenerating(true);
     setDownloadSuccess(false);
+    setZipErrorMsg(null);
 
     try {
       const zipBlob = await createApkZipPackage(config, pythonCode, detectedRequirements);
@@ -116,9 +143,9 @@ finally:
 
       setDownloadSuccess(true);
       setTimeout(() => setDownloadSuccess(false), 5000);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error generating APK zip:', err);
-      alert('Không thể tạo file zip đóng gói: ' + err);
+      setZipErrorMsg('Không thể tạo file zip đóng gói: ' + (err?.message || String(err)));
     } finally {
       setIsGenerating(false);
     }
@@ -134,10 +161,39 @@ finally:
     setIsDownloadingUpdate(true);
     setUpdateStatusMsg(null);
     try {
-      const res = await downloadProjectUpdateZip((msg) => setUpdateStatusMsg(msg));
-      setUpdateStatusMsg(res.message);
+      const res = await downloadProjectUpdateZip((msg) =>
+        setUpdateStatusMsg({ ok: true, text: msg })
+      );
+      setUpdateStatusMsg({ ok: res.ok, text: res.message });
     } finally {
       setIsDownloadingUpdate(false);
+    }
+  };
+
+  const handlePushToGitHub = async () => {
+    if (isPushingGithub) return;
+    setIsPushingGithub(true);
+    setGhPushResult(null);
+    try {
+      try {
+        if (ghRepoInput.trim()) {
+          localStorage.setItem('pydroid_github_update_repo', ghRepoInput.trim());
+        }
+      } catch {}
+
+      const res = await pushProjectUpdateToGitHub({
+        repoInput: ghRepoInput,
+        token: ghTokenInput,
+        branch: ghBranchInput,
+        onProgress: (msg) => setGhPushResult({ ok: true, text: msg }),
+      });
+      setGhPushResult({
+        ok: res.ok,
+        text: res.message,
+        actionsUrl: res.actionsUrl,
+      });
+    } finally {
+      setIsPushingGithub(false);
     }
   };
 
@@ -226,14 +282,22 @@ finally:
           {/* Clarification Banner: Single Script App vs Full IDE APK */}
           <div className="p-3 rounded-xl bg-sky-950/40 border border-sky-500/50 flex items-start space-x-2.5 text-xs">
             <Smartphone className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
+            <div className="space-y-2 flex-1 min-w-0">
               <div className="font-bold text-sky-300">
-                Phạm vi đóng gói: Chỉ đóng gói đoạn code Python hiện tại thành app riêng
+                Phạm vi đóng gói &amp; Cập nhật mã nguồn Pydroid 3 Web cho repo GitHub cũ
               </div>
               <p className="text-slate-300 text-[11px] leading-relaxed">
-                File APK tạo ở đây là ứng dụng độc lập để chạy riêng đoạn code của bạn (không kèm khung soạn thảo IDE hay AI). Nếu muốn đóng gói <strong className="text-white">toàn bộ ứng dụng Pydroid 3 Web</strong> (đầy đủ trình soạn thảo, AI Gemini, giao diện &amp; icon mới giống hệt bản web), hãy tải gói file cập nhật cho mã nguồn GitHub cũ bên dưới rồi tải lên bằng Token GitHub và chạy workflow <code className="text-sky-200 font-mono">build-apk.yml</code>.
+                Gói đóng gói ở dưới cùng chỉ đóng gói đoạn code Python hiện tại thành app riêng. Nếu muốn cập nhật <strong className="text-white">toàn bộ ứng dụng Pydroid 3 Web</strong> (đủ <code className="text-sky-200 font-mono">src/</code>, icon &amp; <code className="text-sky-200 font-mono">build-apk.yml</code>) lên repo GitHub cũ, bạn có thể đẩy trực tiếp bằng GitHub Token hoặc tải file <code className="text-amber-200 font-mono">.ZIP</code> chuẩn thư mục gốc.
               </p>
-              <div className="pt-1.5 flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowGithubPush((v) => !v)}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 text-emerald-200 font-semibold text-[11px] flex items-center space-x-1.5 transition"
+                >
+                  <UploadCloud className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>{showGithubPush ? 'Ẩn đẩy thẳng GitHub' : 'Đẩy thẳng lên GitHub bằng Token'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleDownloadUpdateBundle}
@@ -244,15 +308,101 @@ finally:
                   <span>
                     {isDownloadingUpdate
                       ? 'Đang nén file cập nhật...'
-                      : 'Tải các file cập nhật cho mã nguồn cũ (.ZIP)'}
+                      : 'Tải file cập nhật mã nguồn cũ (.ZIP)'}
                   </span>
                 </button>
-                {updateStatusMsg && (
-                  <span className="text-[11px] text-emerald-300">{updateStatusMsg}</span>
-                )}
               </div>
+
+              {updateStatusMsg && (
+                <div
+                  className={`p-2 rounded-lg text-[11px] border leading-snug ${
+                    updateStatusMsg.ok
+                      ? 'bg-emerald-950/40 border-emerald-500/45 text-emerald-200'
+                      : 'bg-rose-950/40 border-rose-500/45 text-rose-200'
+                  }`}
+                >
+                  {updateStatusMsg.text}
+                </div>
+              )}
+
+              {showGithubPush && (
+                <div className="p-2.5 rounded-xl bg-[#0e1422] border border-emerald-500/35 space-y-2 text-[11px]">
+                  <div className="font-semibold text-emerald-300">
+                    Đẩy trực tiếp toàn bộ bản cập nhật lên Repo GitHub cũ (không lo lỗi thư mục lồng nhau / thiếu .github):
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={ghRepoInput}
+                      onChange={(e) => setGhRepoInput(e.target.value)}
+                      placeholder="username/ten-repo hoặc link GitHub"
+                      className="w-full bg-[#090d16] border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 font-mono text-[11px] focus:outline-none focus:border-emerald-400"
+                    />
+                    <input
+                      type="text"
+                      value={ghBranchInput}
+                      onChange={(e) => setGhBranchInput(e.target.value)}
+                      placeholder="Nhánh (để trống = nhánh mặc định)"
+                      className="w-full bg-[#090d16] border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 font-mono text-[11px] focus:outline-none focus:border-emerald-400"
+                    />
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="password"
+                      value={ghTokenInput}
+                      onChange={(e) => setGhTokenInput(e.target.value)}
+                      placeholder="GitHub Personal Access Token (nên bật quyền repo + workflow)"
+                      className="flex-1 bg-[#090d16] border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 font-mono text-[11px] focus:outline-none focus:border-emerald-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={handlePushToGitHub}
+                      disabled={isPushingGithub}
+                      className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center justify-center space-x-1.5 transition disabled:opacity-60 shrink-0"
+                    >
+                      {isPushingGithub ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Github className="w-3.5 h-3.5" />
+                      )}
+                      <span>{isPushingGithub ? 'Đang đẩy...' : 'Đẩy & Build APK'}</span>
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-snug">
+                    Token chỉ dùng tạm thời trong phiên hiện tại (không lưu vào bộ nhớ). Nếu cập nhật cả <code className="text-emerald-300 font-mono">.github/workflows/build-apk.yml</code>, hãy tích thêm quyền <code className="text-amber-300 font-mono">workflow</code> khi tạo Token.
+                  </p>
+                  {ghPushResult && (
+                    <div
+                      className={`p-2 rounded-lg border leading-snug space-y-1 ${
+                        ghPushResult.ok
+                          ? 'bg-emerald-950/45 border-emerald-500/45 text-emerald-200'
+                          : 'bg-rose-950/45 border-rose-500/45 text-rose-200'
+                      }`}
+                    >
+                      <div>{ghPushResult.text}</div>
+                      {ghPushResult.actionsUrl && (
+                        <a
+                          href={ghPushResult.actionsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center space-x-1 text-sky-300 hover:text-sky-200 underline font-semibold"
+                        >
+                          <span>Mở GitHub Actions để tải APK mới</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
+
+          {zipErrorMsg && (
+            <div className="p-2.5 rounded-xl bg-rose-950/50 border border-rose-500/60 text-rose-200 text-xs">
+              {zipErrorMsg}
+            </div>
+          )}
 
           {/* Warning Banner: Chrome Auto-Translate Hazard */}
           <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/60 flex items-start space-x-2.5 text-xs">
