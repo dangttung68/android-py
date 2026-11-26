@@ -34,7 +34,7 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '10mb' }));
 
-function getGeminiClient(customApiKey?: string, timeoutMs = 12000): GoogleGenAI {
+function getGeminiClient(customApiKey?: string, timeoutMs = 15000): GoogleGenAI {
   const apiKey = (customApiKey && customApiKey.trim()) || process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey.trim() === '' || apiKey === 'MY_GEMINI_API_KEY') {
     throw new Error(
@@ -50,6 +50,27 @@ function getGeminiClient(customApiKey?: string, timeoutMs = 12000): GoogleGenAI 
       timeout: timeoutMs,
     },
   });
+}
+
+function buildModelConfig(
+  model: string,
+  baseConfig: Record<string, any> = {},
+  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
+): Record<string, any> {
+  const nextConfig: Record<string, any> = { ...baseConfig };
+  if (model === 'gemini-4-hydrogen') {
+    // gemini-4-hydrogen supports LOW/MEDIUM/HIGH/XHIGH (MINIMAL returns 400)
+    nextConfig.thinkingConfig = {
+      thinkingLevel: thinkingLevel === ThinkingLevel.MINIMAL ? ThinkingLevel.LOW : thinkingLevel,
+    };
+  } else if (model === 'gemini-3.1-flash-lite') {
+    nextConfig.thinkingConfig = {
+      thinkingLevel: ThinkingLevel.MINIMAL,
+    };
+  } else if (nextConfig.thinkingConfig) {
+    delete nextConfig.thinkingConfig;
+  }
+  return nextConfig;
 }
 
 // Track model quota/overload cooldowns in-memory to skip slow/unavailable models immediately
@@ -87,9 +108,9 @@ function recordModelCooldown(model: string, err: any) {
     return;
   }
 
-  // Cooldown 503/504/timeout models for 2 minutes so subsequent requests don't stall
-  modelQuotaCooldown[model] = Date.now() + 2 * 60 * 1000;
-  console.log(`[Gemini] Model ${model} is busy/slow, switching to fast backup model.`);
+  // Cooldown 503/504/timeout models for 90s so subsequent requests don't stall
+  modelQuotaCooldown[model] = Date.now() + 90 * 1000;
+  console.log(`[Gemini] Model ${model} is busy/slow (${msg.slice(0, 120)}), switching to backup model.`);
 }
 
 // Resilient Gemini Call with Smart Model Fallback (Handles transient 503/429/504 spikes smoothly)
@@ -101,27 +122,24 @@ async function callGeminiWithFallback(params: {
   thinkingLevel?: ThinkingLevel;
   timeoutMs?: number;
 }): Promise<string> {
-  const ai = getGeminiClient(params.customApiKey, params.timeoutMs || 12000);
+  const ai = getGeminiClient(params.customApiKey, params.timeoutMs || 15000);
 
   // Order fast, high-availability models from gemini_api skill
   const models = getOrderedModels([
-    params.preferredModel || 'gemini-3.1-flash-lite',
-    'gemini-3.1-flash-lite',
+    params.preferredModel || 'gemini-4-hydrogen',
     'gemini-4-hydrogen',
+    'gemini-3.1-flash-lite',
   ]);
 
   let lastErr: any = null;
 
   for (const model of models) {
     try {
-      const configToUse = { ...params.config };
-      if (model === 'gemini-4-hydrogen') {
-        configToUse.thinkingConfig = configToUse.thinkingConfig || {
-          thinkingLevel: params.thinkingLevel || ThinkingLevel.MINIMAL,
-        };
-      } else if (configToUse.thinkingConfig) {
-        delete configToUse.thinkingConfig;
-      }
+      const configToUse = buildModelConfig(
+        model,
+        params.config,
+        params.thinkingLevel || ThinkingLevel.LOW
+      );
 
       const response = await ai.models.generateContent({
         model,
@@ -189,10 +207,7 @@ app.post('/api/gemini/validate', async (req, res) => {
     try {
       const result = await Promise.any(
         candidateModels.map(async (model) => {
-          const config: any = { maxOutputTokens: 1 };
-          if (model === 'gemini-4-hydrogen') {
-            config.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-          }
+          const config = buildModelConfig(model, { maxOutputTokens: 1 }, ThinkingLevel.LOW);
           const pingResponse = await testAi.models.generateContent({
             model,
             contents: 'ping',
@@ -351,6 +366,7 @@ app.post('/api/gemini/debug', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders?.();
+      res.write(': connected\n\n');
 
       const streamPrompt = `Phân tích đoạn mã Python sau và trả lời ĐÚNG theo cấu trúc các thẻ sau (không thêm chữ thừa ngoài thẻ, viết hoàn toàn bằng tiếng Việt):
 
@@ -375,26 +391,37 @@ ${code}
 ${errorOutput || '(Người dùng yêu cầu kiểm tra cú pháp và tối ưu trước khi chạy)'}
 ${context ? `\n--- NGỮ CẢNH BỔ SUNG: ${context} ---` : ''}`;
 
-      const ai = getGeminiClient(customApiKey);
+      const ai = getGeminiClient(customApiKey, 16000);
       const streamModels = getOrderedModels([
-        'gemini-3.1-flash-lite',
         'gemini-4-hydrogen',
+        'gemini-3.1-flash-lite',
       ]);
 
       let streamSucceeded = false;
       let lastStreamErr: any = null;
+      let clientClosed = false;
+      req.on('close', () => {
+        clientClosed = true;
+      });
 
       for (const model of streamModels) {
+        if (clientClosed) return res.end();
         let rawAccumulated = '';
         let sentAnyChunk = false;
+        const firstChunkAbort = new AbortController();
+        const firstChunkTimer = setTimeout(() => {
+          if (!sentAnyChunk) firstChunkAbort.abort();
+        }, 10000);
         try {
-          const config: any = {
-            systemInstruction:
-              'Bạn là chuyên gia gỡ lỗi Python trong Pydroid 3 IDE. Luôn xuất đúng thứ tự 6 thẻ <<<ERRORTYPE>>>, <<<LINENUMBER>>>, <<<SUMMARY>>>, <<<EXPLANATION>>>, <<<FIXEDCODE>>>, <<<SUGGESTIONS>>> bằng tiếng Việt.',
-          };
-          if (model === 'gemini-4-hydrogen') {
-            config.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-          }
+          const config = buildModelConfig(
+            model,
+            {
+              systemInstruction:
+                'Bạn là chuyên gia gỡ lỗi Python trong Pydroid 3 IDE. Luôn xuất đúng thứ tự 6 thẻ <<<ERRORTYPE>>>, <<<LINENUMBER>>>, <<<SUMMARY>>>, <<<EXPLANATION>>>, <<<FIXEDCODE>>>, <<<SUGGESTIONS>>> bằng tiếng Việt.',
+              abortSignal: firstChunkAbort.signal,
+            },
+            ThinkingLevel.LOW
+          );
 
           const responseStream = await ai.models.generateContentStream({
             model,
@@ -404,8 +431,13 @@ ${context ? `\n--- NGỮ CẢNH BỔ SUNG: ${context} ---` : ''}`;
 
           let lastEmittedHash = '';
           for await (const chunk of responseStream) {
+            if (clientClosed) {
+              clearTimeout(firstChunkTimer);
+              return res.end();
+            }
             const text = chunk.text;
             if (!text) continue;
+            clearTimeout(firstChunkTimer);
             rawAccumulated += text;
             const parsed = parseTaggedDebugOutput(rawAccumulated, '');
             const hasContent = !!(
@@ -424,6 +456,7 @@ ${context ? `\n--- NGỮ CẢNH BỔ SUNG: ${context} ---` : ''}`;
               }
             }
           }
+          clearTimeout(firstChunkTimer);
 
           const finalParsed = parseTaggedDebugOutput(rawAccumulated, code);
           const finalResult: ParsedDebugPayload = {
@@ -439,6 +472,7 @@ ${context ? `\n--- NGỮ CẢNH BỔ SUNG: ${context} ---` : ''}`;
           streamSucceeded = true;
           return res.end();
         } catch (err: any) {
+          clearTimeout(firstChunkTimer);
           lastStreamErr = err;
           const msg = err?.message || String(err);
           const isAuthError =
@@ -577,23 +611,37 @@ app.post('/api/gemini/explain', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders?.();
+      res.write(': connected\n\n');
 
-      const ai = getGeminiClient(customApiKey);
+      const ai = getGeminiClient(customApiKey, 16000);
       const streamModels = getOrderedModels([
-        'gemini-3.1-flash-lite',
         'gemini-4-hydrogen',
+        'gemini-3.1-flash-lite',
       ]);
 
       let streamSucceeded = false;
       let lastStreamErr: any = null;
+      let clientClosed = false;
+      req.on('close', () => {
+        clientClosed = true;
+      });
 
       for (const model of streamModels) {
+        if (clientClosed) return res.end();
         let sentAnyChunk = false;
+        const firstChunkAbort = new AbortController();
+        const firstChunkTimer = setTimeout(() => {
+          if (!sentAnyChunk) firstChunkAbort.abort();
+        }, 10000);
         try {
-          const config: any = { systemInstruction };
-          if (model === 'gemini-4-hydrogen') {
-            config.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-          }
+          const config = buildModelConfig(
+            model,
+            {
+              systemInstruction,
+              abortSignal: firstChunkAbort.signal,
+            },
+            ThinkingLevel.LOW
+          );
 
           const responseStream = await ai.models.generateContentStream({
             model,
@@ -602,16 +650,23 @@ app.post('/api/gemini/explain', async (req, res) => {
           });
 
           for await (const chunk of responseStream) {
+            if (clientClosed) {
+              clearTimeout(firstChunkTimer);
+              return res.end();
+            }
             const text = chunk.text;
             if (text) {
+              clearTimeout(firstChunkTimer);
               sentAnyChunk = true;
               res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
             }
           }
+          clearTimeout(firstChunkTimer);
           res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
           streamSucceeded = true;
           return res.end();
         } catch (err: any) {
+          clearTimeout(firstChunkTimer);
           lastStreamErr = err;
           const msg = err?.message || String(err);
           const isAuthError =
@@ -764,6 +819,11 @@ app.post('/api/gemini/chat', async (req, res) => {
       parts: [{ text: m.content || '' }],
     }));
 
+    const trimmedCode =
+      typeof currentCode === 'string' && currentCode.length > 4000
+        ? currentCode.slice(0, 4000)
+        : currentCode;
+
     const systemInstruction = `Bạn là Trợ lý Lập Trình Python AI của Pydroid 3 Web (môi trường lập trình tối ưu cho Android).
 Nhiệm vụ của bạn là hỗ trợ lập trình viên di động:
 - Trả lời ngắn gọn, chuẩn xác, dễ đọc trên màn hình điện thoại.
@@ -771,7 +831,7 @@ Nhiệm vụ của bạn là hỗ trợ lập trình viên di động:
 - Hỗ trợ các thư viện: NumPy, Matplotlib, Kivy (cho Android APK), Pyodide, Requests, v.v.
 - Khi người dùng gửi mã hoặc hỏi cách làm, luôn đưa ra đoạn mã rõ ràng có khối \`\`\`python ... \`\`\`.
 - Luôn giao tiếp bằng tiếng Việt lịch sự, thân thiện và khuyến khích.
-${currentCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${currentCode}\n\`\`\`` : ''}`;
+${trimmedCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${trimmedCode}\n\`\`\`` : ''}`;
 
     const isStreaming = req.headers.accept?.includes('text/event-stream') || stream === true;
 
@@ -781,23 +841,37 @@ ${currentCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${c
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders?.();
+      res.write(': connected\n\n');
 
-      const ai = getGeminiClient(customApiKey);
+      const ai = getGeminiClient(customApiKey, 15000);
       const streamCandidateModels = getOrderedModels([
-        'gemini-3.1-flash-lite',
         'gemini-4-hydrogen',
+        'gemini-3.1-flash-lite',
       ]);
 
       let streamSucceeded = false;
       let lastStreamErr: any = null;
+      let clientClosed = false;
+      req.on('close', () => {
+        clientClosed = true;
+      });
 
       for (const model of streamCandidateModels) {
+        if (clientClosed) return res.end();
         let sentAnyChunk = false;
+        const firstChunkAbort = new AbortController();
+        const firstChunkTimer = setTimeout(() => {
+          if (!sentAnyChunk) firstChunkAbort.abort();
+        }, 9000);
         try {
-          const config: any = { systemInstruction };
-          if (model === 'gemini-4-hydrogen') {
-            config.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-          }
+          const config = buildModelConfig(
+            model,
+            {
+              systemInstruction,
+              abortSignal: firstChunkAbort.signal,
+            },
+            ThinkingLevel.LOW
+          );
 
           const responseStream = await ai.models.generateContentStream({
             model,
@@ -806,16 +880,26 @@ ${currentCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${c
           });
 
           for await (const chunk of responseStream) {
+            if (clientClosed) {
+              clearTimeout(firstChunkTimer);
+              return res.end();
+            }
             const text = chunk.text;
             if (text) {
+              clearTimeout(firstChunkTimer);
               sentAnyChunk = true;
               res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
             }
+          }
+          clearTimeout(firstChunkTimer);
+          if (!sentAnyChunk) {
+            throw new Error('Empty stream response');
           }
           res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
           streamSucceeded = true;
           return res.end();
         } catch (e: any) {
+          clearTimeout(firstChunkTimer);
           lastStreamErr = e;
           const msg = e?.message || String(e);
           const isAuthError =
@@ -849,6 +933,8 @@ ${currentCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${c
         const friendly =
           errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')
             ? 'Hệ thống AI đang tạm thời đạt giới hạn lưu lượng (429). Vui lòng thử lại sau ít phút.'
+            : errMsg.includes('503') || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE')
+            ? 'Hệ thống AI đang quá tải tạm thời (503). Vui lòng thử lại sau giây lát.'
             : 'Không thể kết nối đến Trợ lý AI lúc này. Vui lòng thử lại sau giây lát.';
         res.write(`data: ${JSON.stringify({ error: friendly })}\n\n`);
         return res.end();
@@ -857,8 +943,8 @@ ${currentCode ? `\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${c
     }
 
     const reply = await callGeminiWithFallback({
-      preferredModel: 'gemini-3.1-flash-lite',
-      thinkingLevel: ThinkingLevel.MINIMAL,
+      preferredModel: 'gemini-4-hydrogen',
+      thinkingLevel: ThinkingLevel.LOW,
       contents: formattedContents,
       customApiKey,
       config: {

@@ -4,6 +4,7 @@ import {
   getApiBaseUrl,
   isMobileOrApk,
   fetchWithTimeout,
+  wakeBackendServer,
   hasReachablePublicBackendOnApk,
 } from '../utils/apiConfig';
 
@@ -253,6 +254,41 @@ export async function validateGeminiApiKey(apiKey: string): Promise<{
     message: data.message || 'Khóa Gemini API hợp lệ và sẵn sàng sử dụng!',
     model: data.model,
   };
+}
+
+let lastAiWarmAt = 0;
+let inflightAiWarm: Promise<boolean> | null = null;
+
+/**
+ * Silently wakes/warms the backend AI server when the Assistant modal opens
+ * so sleeping Cloud Run / Render containers are ready before the user hits Send.
+ */
+export function prewarmAIServer(): Promise<boolean> {
+  if (typeof window === 'undefined') return Promise.resolve(false);
+  const now = Date.now();
+  if (now - lastAiWarmAt < 40_000) {
+    return Promise.resolve(true);
+  }
+  if (inflightAiWarm) {
+    return inflightAiWarm;
+  }
+  inflightAiWarm = fetchWithTimeout(
+    getApiUrl('/api/health'),
+    { method: 'GET', cache: 'no-store' },
+    10000
+  )
+    .then((res) => {
+      if (res.ok) {
+        lastAiWarmAt = Date.now();
+        return true;
+      }
+      return false;
+    })
+    .catch(() => false)
+    .finally(() => {
+      inflightAiWarm = null;
+    });
+  return inflightAiWarm;
 }
 
 /**
@@ -883,73 +919,136 @@ export async function requestAIChat(
 /**
  * AI Chat Streaming Assistant
  * Proxied via Server-Sent Events (SSE) from server route /api/gemini/chat
+ * Includes connect timeout, JSON fallback, and automatic retry on transient cold-start/5xx failures.
  */
 export async function requestAIChatStream(
   messages: { role: 'user' | 'assistant'; content: string }[],
   onChunk: (chunk: string) => void,
-  currentCode?: string
+  currentCode?: string,
+  options?: {
+    signal?: AbortSignal;
+    onStatus?: (message: string) => void;
+  }
 ): Promise<string> {
-  const headers = getAuthHeaders();
-  headers['Accept'] = 'text/event-stream';
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let emittedAny = false;
+    try {
+      const headers = getAuthHeaders();
+      headers['Accept'] = 'text/event-stream';
 
-  let response: Response;
-  try {
-    response = await fetch(getApiUrl('/api/gemini/chat'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ messages, currentCode, stream: true }),
-    });
-  } catch (err: any) {
-    throw buildFriendlyNetworkError(err);
-  }
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          getApiUrl('/api/gemini/chat'),
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ messages, currentCode, stream: true }),
+            signal: options?.signal,
+          },
+          25000
+        );
+      } catch (err: any) {
+        if (options?.signal?.aborted) throw err;
+        throw buildFriendlyNetworkError(err);
+      }
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Lỗi kết nối Trợ lý AI (${response.status})`);
-  }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const err: any = new Error(
+          errorData.error || `Lỗi kết nối Trợ lý AI (${response.status})`
+        );
+        err.status = response.status;
+        throw err;
+      }
 
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('text/html')) {
-    throw new Error('Không thể kết nối đến máy chủ AI Cloud (HTML response). Hãy kiểm tra cấu hình URL máy chủ.');
-  }
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new Error(
+          'Không thể kết nối đến máy chủ AI Cloud (HTML response). Hãy kiểm tra cấu hình URL máy chủ.'
+        );
+      }
 
-  if (response.body) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-    let accumulated = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const jsonStr = trimmed.replace(/^data:\s*/, '');
-        let payload: any = null;
-        try {
-          payload = JSON.parse(jsonStr);
-        } catch {
-          continue;
+      let finalReply = '';
+      if (contentType.includes('application/json') || !response.body) {
+        const data = await response.json().catch(() => ({}));
+        finalReply = data.reply || '';
+        if (finalReply) {
+          emittedAny = true;
+          onChunk(finalReply);
         }
-        if (payload?.chunk) {
-          accumulated += payload.chunk;
-          onChunk(payload.chunk);
-        } else if (payload?.error) {
-          throw new Error(payload.error);
+      } else {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const jsonStr = trimmed.replace(/^data:\s*/, '');
+            let payload: any = null;
+            try {
+              payload = JSON.parse(jsonStr);
+            } catch {
+              continue;
+            }
+            if (payload?.chunk) {
+              emittedAny = true;
+              finalReply += payload.chunk;
+              onChunk(payload.chunk);
+            } else if (payload?.error) {
+              throw new Error(payload.error);
+            }
+          }
         }
       }
+
+      if (finalReply.trim()) {
+        lastAiWarmAt = Date.now();
+        return finalReply;
+      }
+      throw new Error('Máy chủ AI không trả về nội dung.');
+    } catch (err: any) {
+      lastError = err;
+      if (options?.signal?.aborted) {
+        throw err;
+      }
+
+      const msg = err?.message || String(err || '');
+      const isAuthOrQuota =
+        msg.includes('API Key') ||
+        msg.includes('Khóa') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('429') ||
+        msg.includes('RESOURCE_EXHAUSTED') ||
+        msg.includes('HTML response');
+
+      if (attempt >= 2 || isAuthOrQuota || emittedAny) {
+        throw err;
+      }
+
+      // Transient cold-start / network / 502-504 error: wake server briefly and retry once automatically
+      options?.onStatus?.('Đang đánh thức máy chủ AI & thử kết nối lại...');
+      const baseUrl = getApiBaseUrl();
+      if (baseUrl) {
+        await wakeBackendServer(baseUrl, {
+          timeoutMs: 22000,
+          onProgress: options?.onStatus,
+        }).catch(() => {});
+      } else {
+        await new Promise((r) => setTimeout(r, 650));
+      }
     }
-    return accumulated;
   }
 
-  const data = await response.json();
-  const reply = data.reply || '';
-  onChunk(reply);
-  return reply;
+  throw lastError || new Error('Không thể kết nối đến Trợ lý AI lúc này.');
 }
