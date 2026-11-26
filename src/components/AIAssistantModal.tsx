@@ -143,6 +143,7 @@ export const AIAssistantModal: React.FC<AIAssistantModalProps> = ({
 
     try {
       const recentMessages = newMessages
+        .filter((m) => !(m.role === 'assistant' && m.content.startsWith('⚠️ ')))
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content }));
       const trimmedCode = currentCode.length > 4000 ? currentCode.slice(0, 4000) : currentCode;
@@ -189,6 +190,8 @@ export const AIAssistantModal: React.FC<AIAssistantModalProps> = ({
         friendlyError = 'Hệ thống AI đang xử lý lượng yêu cầu cao. Bạn vui lòng nhấn gửi lại sau vài giây nhé!';
       } else if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
         friendlyError = 'Hệ thống AI đang tạm thời đạt giới hạn lưu lượng miễn phí. Vui lòng thử lại sau 1-2 phút nhé!';
+      } else if (raw.includes('Model AI') || raw.includes('(400)') || raw.includes('(504)') || raw.includes('quá thời gian chờ')) {
+        friendlyError = raw;
       } else if (raw.includes('HTML response') || raw.includes('404')) {
         friendlyError = 'Bản APK chưa kết nối được tới máy chủ Cloud Backend. Hãy mở Menu > Máy Chủ AI & Backend Cloud > Cấu hình để nhập URL máy chủ đã triển khai.';
       } else if (

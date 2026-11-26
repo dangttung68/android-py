@@ -153,23 +153,75 @@ function normalizeDebugResult(data: any, fallbackCode: string, isPartial = false
 
 function buildFriendlyNetworkError(err: any): Error {
   const msg = err?.message || String(err || '');
+  const isTimeout = err?.name === 'AbortError' || msg.includes('AbortError') || msg.includes('timed out');
   const isNet =
+    isTimeout ||
     msg.includes('Failed to fetch') ||
     msg.includes('NetworkError') ||
-    msg.includes('Load failed') ||
-    msg.includes('AbortError') ||
-    msg.includes('timed out');
+    msg.includes('Load failed');
 
   if (isNet) {
     const base = getApiBaseUrl();
     if (isMobileOrApk()) {
       return new Error(
-        `Không thể kết nối tới máy chủ Backend (${base || 'chưa cấu hình'}). Bản APK không có máy chủ nội bộ và URL xem trước AI Studio không mở cho ứng dụng rời; hãy triển khai server lên Cloud Run / Render rồi nhập URL đó vào Cài đặt Máy chủ.`
+        isTimeout
+          ? `Hết thời gian chờ phản hồi từ máy chủ AI (${base || 'chưa cấu hình'}). Vui lòng thử lại sau giây lát.`
+          : `Không thể kết nối tới máy chủ Backend (${base || 'chưa cấu hình'}). Bản APK không có máy chủ nội bộ và URL xem trước AI Studio không mở cho ứng dụng rời; hãy triển khai server lên Cloud Run / Render rồi nhập URL đó vào Cài đặt Máy chủ.`
       );
     }
-    return new Error('Không thể kết nối tới máy chủ Backend. Vui lòng kiểm tra lại kết nối mạng.');
+    return new Error(
+      isTimeout
+        ? 'Hết thời gian chờ phản hồi từ máy chủ AI. Vui lòng thử lại sau giây lát.'
+        : 'Không thể kết nối tới máy chủ Backend. Vui lòng kiểm tra lại kết nối mạng.'
+    );
   }
   return err instanceof Error ? err : new Error(msg);
+}
+
+async function consumeSseStream(
+  body: ReadableStream<Uint8Array>,
+  onPayload: (payload: any) => void
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  const dispatchFrame = (frame: string) => {
+    const dataLines = frame
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.replace(/^data:\s*/, ''));
+    if (dataLines.length === 0) return;
+
+    const jsonStr = dataLines.join('\n');
+    let payload: any = null;
+    try {
+      payload = JSON.parse(jsonStr);
+    } catch {
+      return;
+    }
+    onPayload(payload);
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for (const frame of frames) {
+      dispatchFrame(frame);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    for (const frame of buffer.split(/\r?\n\r?\n/)) {
+      if (frame.trim()) dispatchFrame(frame);
+    }
+  }
 }
 
 export function getSavedGeminiApiKey(): string {
@@ -265,6 +317,9 @@ let inflightAiWarm: Promise<boolean> | null = null;
  */
 export function prewarmAIServer(): Promise<boolean> {
   if (typeof window === 'undefined') return Promise.resolve(false);
+  if (isMobileOrApk() && !hasReachablePublicBackendOnApk()) {
+    return Promise.resolve(false);
+  }
   const now = Date.now();
   if (now - lastAiWarmAt < 40_000) {
     return Promise.resolve(true);
@@ -677,12 +732,16 @@ export async function requestAIDebugStream(
 
     let response: Response;
     try {
-      response = await fetch(getApiUrl('/api/gemini/debug'), {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ code, errorOutput, context: options?.context, stream: true }),
-        signal: options?.signal,
-      });
+      response = await fetchWithTimeout(
+        getApiUrl('/api/gemini/debug'),
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ code, errorOutput, context: options?.context, stream: true }),
+          signal: options?.signal,
+        },
+        45000
+      );
     } catch (err: any) {
       throw buildFriendlyNetworkError(err);
     }
@@ -708,45 +767,23 @@ export async function requestAIDebugStream(
       return normalized;
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
     let finalResult: AIDebugResult | null = null;
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split('\n\n');
-      buffer = events.pop() || '';
-
-      for (const evt of events) {
-        const trimmed = evt.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const jsonStr = trimmed.replace(/^data:\s*/, '');
-        let payload: any = null;
-        try {
-          payload = JSON.parse(jsonStr);
-        } catch {
-          continue;
-        }
-
-        if (payload?.error) {
-          throw new Error(payload.error);
-        }
-
-        if (payload?.partial) {
-          const partialResult = normalizeDebugResult(payload.partial, '', true);
-          emitPartial(partialResult);
-        }
-
-        if (payload?.done && payload?.result) {
-          finalResult = normalizeDebugResult(payload.result, code);
-          emitPartial(finalResult);
-        }
+    await consumeSseStream(response.body, (payload) => {
+      if (payload?.error) {
+        throw new Error(payload.error);
       }
-    }
+
+      if (payload?.partial) {
+        const partialResult = normalizeDebugResult(payload.partial, '', true);
+        emitPartial(partialResult);
+      }
+
+      if (payload?.done && payload?.result) {
+        finalResult = normalizeDebugResult(payload.result, code);
+        emitPartial(finalResult);
+      }
+    });
 
     if (!finalResult) {
       finalResult = entry.latestPartial
@@ -821,12 +858,16 @@ export async function requestAIExplainStream(
 
   let response: Response;
   try {
-    response = await fetch(getApiUrl('/api/gemini/explain'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ code, question: options?.question, stream: true }),
-      signal: options?.signal,
-    });
+    response = await fetchWithTimeout(
+      getApiUrl('/api/gemini/explain'),
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ code, question: options?.question, stream: true }),
+        signal: options?.signal,
+      },
+      45000
+    );
   } catch (err: any) {
     throw buildFriendlyNetworkError(err);
   }
@@ -851,38 +892,16 @@ export async function requestAIExplainStream(
     return explanation;
   }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
   let accumulated = '';
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const jsonStr = trimmed.replace(/^data:\s*/, '');
-      let payload: any = null;
-      try {
-        payload = JSON.parse(jsonStr);
-      } catch {
-        continue;
-      }
-
-      if (payload?.chunk) {
-        accumulated += payload.chunk;
-        onChunk(accumulated);
-      } else if (payload?.error) {
-        throw new Error(payload.error);
-      }
+  await consumeSseStream(response.body, (payload) => {
+    if (payload?.chunk) {
+      accumulated += payload.chunk;
+      onChunk(accumulated);
+    } else if (payload?.error) {
+      throw new Error(payload.error);
     }
-  }
+  });
 
   setInCache(explainCache, cacheKey, accumulated);
   return accumulated;
@@ -947,7 +966,7 @@ export async function requestAIChatStream(
             body: JSON.stringify({ messages, currentCode, stream: true }),
             signal: options?.signal,
           },
-          25000
+          45000
         );
       } catch (err: any) {
         if (options?.signal?.aborted) throw err;
@@ -979,36 +998,44 @@ export async function requestAIChatStream(
           onChunk(finalReply);
         }
       } else {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) continue;
-            const jsonStr = trimmed.replace(/^data:\s*/, '');
-            let payload: any = null;
-            try {
-              payload = JSON.parse(jsonStr);
-            } catch {
-              continue;
-            }
-            if (payload?.chunk) {
-              emittedAny = true;
-              finalReply += payload.chunk;
-              onChunk(payload.chunk);
-            } else if (payload?.error) {
-              throw new Error(payload.error);
-            }
+        await consumeSseStream(response.body, (payload) => {
+          if (payload?.chunk) {
+            emittedAny = true;
+            finalReply += payload.chunk;
+            onChunk(payload.chunk);
+          } else if (payload?.error) {
+            throw new Error(payload.error);
           }
+        });
+      }
+
+      // If SSE stream closed without chunks or errors (e.g. proxy/WebView buffered SSE), try non-streaming JSON fallback once
+      if (!finalReply.trim() && !options?.signal?.aborted) {
+        const jsonFallbackRes = await fetchWithTimeout(
+          getApiUrl('/api/gemini/chat'),
+          {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({ messages, currentCode, stream: false }),
+            signal: options?.signal,
+          },
+          30000
+        );
+        if (!jsonFallbackRes.ok) {
+          const errJson = await jsonFallbackRes.json().catch(() => ({}));
+          throw new Error(errJson.error || `Lỗi kết nối Trợ lý AI (${jsonFallbackRes.status})`);
+        }
+        const jsonCt = jsonFallbackRes.headers.get('content-type') || '';
+        if (jsonCt.includes('text/html')) {
+          throw new Error(
+            'Không thể kết nối đến máy chủ AI Cloud (HTML response). Hãy kiểm tra cấu hình URL máy chủ.'
+          );
+        }
+        const fallbackData = await jsonFallbackRes.json().catch(() => ({}));
+        if (typeof fallbackData?.reply === 'string' && fallbackData.reply.trim()) {
+          finalReply = fallbackData.reply;
+          emittedAny = true;
+          onChunk(finalReply);
         }
       }
 
